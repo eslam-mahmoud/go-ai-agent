@@ -80,7 +80,12 @@ func (l *Loop) tick(ctx context.Context) error {
 		l.log.Debug("at capacity, skipping poll", "active", active, "max", maxParallel)
 	}
 
-	// 2. Check awaiting-feedback issues for human replies.
+	// 2. Check CI-pending tasks.
+	if err := l.checkCIPending(ctx); err != nil {
+		l.log.Error("CI pending check failed", "err", err)
+	}
+
+	// 3. Check awaiting-feedback issues for human replies.
 	if err := l.checkAwaitingFeedback(ctx); err != nil {
 		l.log.Error("awaiting-feedback check failed", "err", err)
 	}
@@ -89,7 +94,7 @@ func (l *Loop) tick(ctx context.Context) error {
 		return nil
 	}
 
-	// 3. Pick next ready task.
+	// 4. Pick next ready task.
 	return l.pickAndRun(ctx)
 }
 
@@ -275,6 +280,21 @@ func (l *Loop) handleClarification(ctx context.Context, owner, repo, fullRepo st
 
 func (l *Loop) handleCompletion(ctx context.Context, owner, repo, fullRepo string, issueNumber int, issue *githubclient.Issue, output string) error {
 	l.log.Info("task completed", "repo", fullRepo, "issue", issueNumber)
+
+	// If CI is enabled and Claude opened a PR, hand off to CI watching instead of finalizing now.
+	if l.cfg.CI.Enabled {
+		if prNumber := extractPRNumber(output); prNumber > 0 {
+			l.log.Info("PR detected, starting CI watch", "repo", fullRepo, "issue", issueNumber, "pr", prNumber)
+			commentBody := fmt.Sprintf(
+				"🔄 **Madar opened PR #%d.** Waiting for CI checks before finalizing...\n\n%s",
+				prNumber, truncate(output, 3000),
+			)
+			if _, err := l.gh.PostComment(ctx, owner, repo, issueNumber, commentBody); err != nil {
+				l.log.Warn("post CI-watch comment failed", "err", err)
+			}
+			return l.StartCIWatch(ctx, fullRepo, issueNumber, prNumber)
+		}
+	}
 
 	summary := output
 	if len(summary) > 4000 {

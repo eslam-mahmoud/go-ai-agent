@@ -236,3 +236,20 @@ func BuildFirstRunPrompt(issueTitle, issueBody, threadComments string) string {
 func BuildResumePrompt(humanReply string) string {
 	return fmt.Sprintf("Maintainer answered: %s\n\nContinue with the task.", humanReply)
 }
+
+// BuildCIFixPrompt creates the prompt sent to Claude when CI fails.
+// It provides the failure output so Claude can diagnose and fix the issue.
+func BuildCIFixPrompt(failureOutput string, retryN, maxRetries int) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf(
+		"CI failed on attempt %d of %d. Fix the failures and push again.\n\n",
+		retryN, maxRetries,
+	))
+	sb.WriteString("If you cannot fix the issue within this attempt, respond with:\n")
+	sb.WriteString("NEEDS_CLARIFICATION: <description of the problem>\n\n")
+	sb.WriteString("--- CI Failure Output ---\n")
+	sb.WriteString(failureOutput)
+	sb.WriteString("\n------------------------\n\n")
+	sb.WriteString("Diagnose the root cause, fix it, and push the corrected code.")
+	return sb.String()
+}

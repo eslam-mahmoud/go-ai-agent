@@ -36,6 +36,8 @@ type Client interface {
 	ReplaceLabels(ctx context.Context, owner, repo string, number int, labels []string) error
 	CreateLabel(ctx context.Context, owner, repo, name, color string) error
 	EnsureLabels(ctx context.Context, owner, repo string, labels map[string]string) error
+	GetCheckSuiteStatus(ctx context.Context, owner, repo, branch string) (CheckStatus, error)
+	GetFailedStepOutput(ctx context.Context, owner, repo, branch string) (string, error)
 }
 
 type githubClient struct {

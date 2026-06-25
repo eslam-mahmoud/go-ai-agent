@@ -16,10 +16,18 @@ type Config struct {
 	Repos        []string
 	ContextDir   string
 	Claude       ClaudeConfig
+	CI           CIConfig
 	GitHub       GitHubConfig
 	Telegram     TelegramConfig
 	DBPath       string
 	WorkspaceDir string
+}
+
+type CIConfig struct {
+	Enabled      bool
+	MaxRetries   int
+	PollInterval time.Duration
+	WaitTimeout  time.Duration
 }
 
 type ConcurrencyConfig struct {
@@ -74,6 +82,12 @@ type rawConfig struct {
 		ContextResetThreshold float64 `yaml:"context_reset_threshold"`
 		SkipPermissions       bool    `yaml:"skip_permissions"`
 	} `yaml:"claude"`
+	CI struct {
+		Enabled          bool   `yaml:"enabled"`
+		MaxRetries       int    `yaml:"max_retries"`
+		PollIntervalStr  string `yaml:"poll_interval"`
+		WaitTimeoutStr   string `yaml:"wait_timeout"`
+	} `yaml:"ci"`
 	DBPath       string `yaml:"db_path"`
 	WorkspaceDir string `yaml:"workspace_dir"`
 }
@@ -100,6 +114,14 @@ func Load(configPath, envPath string) (*Config, error) {
 	runTimeout, err := time.ParseDuration(raw.Claude.RunTimeoutStr)
 	if err != nil {
 		return nil, fmt.Errorf("parse run_timeout %q: %w", raw.Claude.RunTimeoutStr, err)
+	}
+	ciPollInterval, err := time.ParseDuration(raw.CI.PollIntervalStr)
+	if err != nil {
+		return nil, fmt.Errorf("parse ci.poll_interval %q: %w", raw.CI.PollIntervalStr, err)
+	}
+	ciWaitTimeout, err := time.ParseDuration(raw.CI.WaitTimeoutStr)
+	if err != nil {
+		return nil, fmt.Errorf("parse ci.wait_timeout %q: %w", raw.CI.WaitTimeoutStr, err)
 	}
 
 	telegramIDs := splitCSV(os.Getenv("TELEGRAM_ALLOWED_IDS"))
@@ -132,6 +154,12 @@ func Load(configPath, envPath string) (*Config, error) {
 		Telegram: TelegramConfig{
 			BotToken:   os.Getenv("TELEGRAM_BOT_TOKEN"),
 			AllowedIDs: telegramIDs,
+		},
+		CI: CIConfig{
+			Enabled:      raw.CI.Enabled,
+			MaxRetries:   raw.CI.MaxRetries,
+			PollInterval: ciPollInterval,
+			WaitTimeout:  ciWaitTimeout,
 		},
 		DBPath:       raw.DBPath,
 		WorkspaceDir: raw.WorkspaceDir,
@@ -173,6 +201,15 @@ func applyDefaults(raw *rawConfig) {
 	}
 	if raw.Claude.ContextResetThreshold == 0 {
 		raw.Claude.ContextResetThreshold = 0.6
+	}
+	if raw.CI.MaxRetries == 0 {
+		raw.CI.MaxRetries = 3
+	}
+	if raw.CI.PollIntervalStr == "" {
+		raw.CI.PollIntervalStr = "30s"
+	}
+	if raw.CI.WaitTimeoutStr == "" {
+		raw.CI.WaitTimeoutStr = "20m"
 	}
 	if raw.DBPath == "" {
 		raw.DBPath = "/opt/madar/madar.db"

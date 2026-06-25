@@ -56,6 +56,12 @@ func (f *fakeGitHub) CreateLabel(_ context.Context, _, _, _, _ string) error { r
 func (f *fakeGitHub) EnsureLabels(_ context.Context, _, _ string, _ map[string]string) error {
 	return nil
 }
+func (f *fakeGitHub) GetCheckSuiteStatus(_ context.Context, _, _, _ string) (githubclient.CheckStatus, error) {
+	return githubclient.CheckSuccess, nil
+}
+func (f *fakeGitHub) GetFailedStepOutput(_ context.Context, _, _, _ string) (string, error) {
+	return "", nil
+}
 
 type fakeRunner struct {
 	result *claude.Result

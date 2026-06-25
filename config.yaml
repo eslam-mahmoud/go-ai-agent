@@ -23,5 +23,11 @@ claude:
   context_reset_threshold: 0.6  # fraction of model window at which to checkpoint and rotate
   skip_permissions: true      # trusted single-user box — skip interactive permission prompts
 
+ci:
+  enabled: false       # set true to enable CI/CD feedback loop
+  max_retries: 3       # re-invoke Claude up to N times on CI failure
+  poll_interval: 30s   # how often to check check suite status
+  wait_timeout: 20m    # give up waiting for CI after this long
+
 db_path: ./madar.db
 workspace_dir: ./workspaces

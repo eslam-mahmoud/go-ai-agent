@@ -1,0 +1,6 @@
+.env
+project.md
+/madar
+/madar-linux-amd64
+*.db
+workspaces/

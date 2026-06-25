@@ -1,0 +1,27 @@
+poll_interval_seconds: 15
+
+concurrency:
+  enabled: false
+  max_parallel: 1
+
+labels:
+  ready: ready
+  in_progress: in-progress
+  awaiting_feedback: awaiting-feedback
+  done: done
+
+repos:
+  - eslam-mahmoud/go-ai-agent
+
+context_dir: .claude-context
+
+claude:
+  output_format: stream-json  # always paired with --verbose
+  max_turns: 40               # caps agentic turns per invocation
+  run_timeout: 30m            # external wrapper; Claude Code has no built-in cap
+  auto_compact: false         # Madar manages context via artifacts + session rotation
+  context_reset_threshold: 0.6  # fraction of model window at which to checkpoint and rotate
+  skip_permissions: true      # trusted single-user box — skip interactive permission prompts
+
+db_path: ./madar.db
+workspace_dir: ./workspaces

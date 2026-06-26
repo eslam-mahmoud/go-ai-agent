@@ -129,6 +129,66 @@ func TestLoad_envVars(t *testing.T) {
 	}
 }
 
+func TestLoad_ciDefaults(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("repos: []\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(cfgPath, "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.CI.Enabled {
+		t.Error("CI.Enabled should default to false")
+	}
+	if cfg.CI.MaxRetries != 3 {
+		t.Errorf("CI.MaxRetries = %d, want 3", cfg.CI.MaxRetries)
+	}
+	if cfg.CI.PollInterval != 30*time.Second {
+		t.Errorf("CI.PollInterval = %v, want 30s", cfg.CI.PollInterval)
+	}
+	if cfg.CI.WaitTimeout != 20*time.Minute {
+		t.Errorf("CI.WaitTimeout = %v, want 20m", cfg.CI.WaitTimeout)
+	}
+}
+
+func TestLoad_ciOverrides(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	yaml := `
+repos: []
+ci:
+  enabled: true
+  max_retries: 5
+  poll_interval: 1m
+  wait_timeout: 10m
+`
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(cfgPath, "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if !cfg.CI.Enabled {
+		t.Error("CI.Enabled should be true")
+	}
+	if cfg.CI.MaxRetries != 5 {
+		t.Errorf("CI.MaxRetries = %d, want 5", cfg.CI.MaxRetries)
+	}
+	if cfg.CI.PollInterval != time.Minute {
+		t.Errorf("CI.PollInterval = %v, want 1m", cfg.CI.PollInterval)
+	}
+	if cfg.CI.WaitTimeout != 10*time.Minute {
+		t.Errorf("CI.WaitTimeout = %v, want 10m", cfg.CI.WaitTimeout)
+	}
+}
+
 func TestLoad_missingFile(t *testing.T) {
 	_, err := Load("/no/such/file.yaml", "")
 	if err == nil {

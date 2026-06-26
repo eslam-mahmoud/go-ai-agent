@@ -2,6 +2,7 @@ package store
 
 import (
 	"testing"
+	"time"
 )
 
 func TestSetPRNumber(t *testing.T) {
@@ -67,6 +68,26 @@ func TestListByCIState(t *testing.T) {
 	passed, _ := s.ListByCIState(CIStatePassed)
 	if len(passed) != 1 {
 		t.Errorf("passed count = %d, want 1", len(passed))
+	}
+}
+
+func TestSetCIWatchStartedAt(t *testing.T) {
+	s := openTestStore(t)
+	_, _ = s.UpsertTask("r", 20, StateInProgress, "sess")
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := s.SetCIWatchStartedAt("r", 20, now); err != nil {
+		t.Fatalf("SetCIWatchStartedAt: %v", err)
+	}
+	got, _ := s.GetTask("r", 20)
+	if got.CIWatchStartedAt == nil {
+		t.Fatal("CIWatchStartedAt is nil")
+	}
+	diff := got.CIWatchStartedAt.Sub(now)
+	if diff < 0 {
+		diff = -diff
+	}
+	if diff > time.Second {
+		t.Errorf("CIWatchStartedAt diff %v too large", diff)
 	}
 }
 

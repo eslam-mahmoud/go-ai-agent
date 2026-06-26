@@ -37,6 +37,7 @@ type Task struct {
 	PRNumber            int
 	CIState             CIState
 	CIRetries           int
+	CIWatchStartedAt    *time.Time
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
 }
@@ -76,6 +77,7 @@ func (s *Store) migrate() error {
 			pr_number INTEGER NOT NULL DEFAULT 0,
 			ci_state TEXT NOT NULL DEFAULT '',
 			ci_retries INTEGER NOT NULL DEFAULT 0,
+			ci_watch_started_at DATETIME,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			UNIQUE(repo, issue_number)
@@ -112,7 +114,7 @@ func (s *Store) UpsertTask(repo string, issueNumber int, state TaskState, sessio
 func (s *Store) GetTask(repo string, issueNumber int) (*Task, error) {
 	row := s.db.QueryRow(`
 		SELECT id, repo, issue_number, session_id, state, last_clarification_at,
-		       pr_number, ci_state, ci_retries, created_at, updated_at
+		       pr_number, ci_state, ci_retries, ci_watch_started_at, created_at, updated_at
 		FROM tasks WHERE repo = ? AND issue_number = ?
 	`, repo, issueNumber)
 	return scanTask(row)
@@ -146,6 +148,13 @@ func (s *Store) SetCIState(repo string, issueNumber int, ciState CIState) error 
 	return err
 }
 
+func (s *Store) SetCIWatchStartedAt(repo string, issueNumber int, t time.Time) error {
+	_, err := s.db.Exec(`
+		UPDATE tasks SET ci_watch_started_at = ?, updated_at = ? WHERE repo = ? AND issue_number = ?
+	`, t.UTC(), time.Now().UTC(), repo, issueNumber)
+	return err
+}
+
 func (s *Store) IncrementCIRetries(repo string, issueNumber int) (int, error) {
 	_, err := s.db.Exec(`
 		UPDATE tasks SET ci_retries = ci_retries + 1, updated_at = ? WHERE repo = ? AND issue_number = ?
@@ -163,7 +172,7 @@ func (s *Store) IncrementCIRetries(repo string, issueNumber int) (int, error) {
 func (s *Store) ListByState(state TaskState) ([]*Task, error) {
 	rows, err := s.db.Query(`
 		SELECT id, repo, issue_number, session_id, state, last_clarification_at,
-		       pr_number, ci_state, ci_retries, created_at, updated_at
+		       pr_number, ci_state, ci_retries, ci_watch_started_at, created_at, updated_at
 		FROM tasks WHERE state = ? ORDER BY created_at ASC
 	`, string(state))
 	if err != nil {
@@ -185,7 +194,7 @@ func (s *Store) ListByState(state TaskState) ([]*Task, error) {
 func (s *Store) ListByCIState(ciState CIState) ([]*Task, error) {
 	rows, err := s.db.Query(`
 		SELECT id, repo, issue_number, session_id, state, last_clarification_at,
-		       pr_number, ci_state, ci_retries, created_at, updated_at
+		       pr_number, ci_state, ci_retries, ci_watch_started_at, created_at, updated_at
 		FROM tasks WHERE ci_state = ? ORDER BY created_at ASC
 	`, string(ciState))
 	if err != nil {
@@ -256,10 +265,10 @@ type scanner interface {
 func scanTask(s scanner) (*Task, error) {
 	var t Task
 	var state, ciState string
-	var clarAt sql.NullTime
+	var clarAt, ciWatchAt sql.NullTime
 	if err := s.Scan(
 		&t.ID, &t.Repo, &t.IssueNumber, &t.SessionID, &state, &clarAt,
-		&t.PRNumber, &ciState, &t.CIRetries, &t.CreatedAt, &t.UpdatedAt,
+		&t.PRNumber, &ciState, &t.CIRetries, &ciWatchAt, &t.CreatedAt, &t.UpdatedAt,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -270,6 +279,9 @@ func scanTask(s scanner) (*Task, error) {
 	t.CIState = CIState(ciState)
 	if clarAt.Valid {
 		t.LastClarificationAt = &clarAt.Time
+	}
+	if ciWatchAt.Valid {
+		t.CIWatchStartedAt = &ciWatchAt.Time
 	}
 	return &t, nil
 }

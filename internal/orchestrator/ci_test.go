@@ -201,8 +201,9 @@ func TestCheckCIPending_waitTimeoutExceeded(t *testing.T) {
 
 	_, _ = s.UpsertTask("owner/repo", 6, store.StateInProgress, "sess")
 	_ = s.SetCIState("owner/repo", 6, store.CIStateWaiting)
-	// Backdate UpdatedAt so timeout is exceeded.
-	// Force by sleeping past the 1ms timeout.
+	// Set CIWatchStartedAt in the past so timeout is exceeded.
+	past := time.Now().UTC().Add(-10 * time.Millisecond)
+	_ = s.SetCIWatchStartedAt("owner/repo", 6, past)
 	time.Sleep(5 * time.Millisecond)
 
 	tg := &fakeTelegram{}

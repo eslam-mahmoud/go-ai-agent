@@ -40,14 +40,17 @@ func (l *Loop) checkCIPending(ctx context.Context) error {
 }
 
 func (l *Loop) advanceCITask(ctx context.Context, owner, repo string, task *store.Task) error {
-	// Enforce wait_timeout: if the task has been CI-waiting longer than the
-	// configured limit, escalate to a human rather than waiting indefinitely.
-	if l.cfg.CI.WaitTimeout > 0 && time.Since(task.UpdatedAt) > l.cfg.CI.WaitTimeout {
-		l.log.Warn("CI wait_timeout exceeded, escalating",
-			"repo", task.Repo, "issue", task.IssueNumber,
-			"waited", time.Since(task.UpdatedAt).Round(time.Second),
-			"timeout", l.cfg.CI.WaitTimeout)
-		return l.giveCIUpToHuman(ctx, owner, repo, task)
+	// Enforce wait_timeout measured from when CI watch started (not last update),
+	// so retries don't silently extend the effective deadline.
+	if l.cfg.CI.WaitTimeout > 0 && task.CIWatchStartedAt != nil {
+		elapsed := time.Since(*task.CIWatchStartedAt)
+		if elapsed > l.cfg.CI.WaitTimeout {
+			l.log.Warn("CI wait_timeout exceeded, escalating",
+				"repo", task.Repo, "issue", task.IssueNumber,
+				"elapsed", elapsed.Round(time.Second),
+				"timeout", l.cfg.CI.WaitTimeout)
+			return l.giveCIUpToHuman(ctx, owner, repo, task)
+		}
 	}
 
 	branch := fmt.Sprintf("madar/issue-%d", task.IssueNumber)
@@ -206,6 +209,11 @@ func (l *Loop) StartCIWatch(ctx context.Context, fullRepo string, issueNumber in
 		return err
 	}
 	if err := l.store.SetCIState(fullRepo, issueNumber, store.CIStateWaiting); err != nil {
+		return err
+	}
+	// Record exact start time so wait_timeout is measured from here, not from
+	// the last updated_at (which resets on every retry).
+	if err := l.store.SetCIWatchStartedAt(fullRepo, issueNumber, time.Now().UTC()); err != nil {
 		return err
 	}
 	_ = l.store.Log(fullRepo, issueNumber, "ci_watch_started",

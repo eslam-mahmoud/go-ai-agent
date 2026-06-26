@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 
@@ -49,6 +50,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Validate that the claude binary is on PATH (or at the configured path).
+	claudeBin := cfg.Claude.Bin
+	if claudeBin == "" {
+		claudeBin = "claude"
+	}
+	if _, err := exec.LookPath(claudeBin); err != nil {
+		log.Error("claude binary not found — install Claude Code or set claude.bin in config",
+			"bin", claudeBin, "err", err)
+		os.Exit(1)
+	}
+
 	s, err := store.Open(cfg.DBPath)
 	if err != nil {
 		log.Error("failed to open store", "err", err)
@@ -57,7 +69,7 @@ func main() {
 	defer s.Close()
 
 	ghClient := githubclient.New(cfg.GitHub.Token)
-	runner := claude.New("")
+	runner := claude.New(cfg.Claude.Bin)
 	tg := telegram.New(cfg.Telegram.BotToken, cfg.Telegram.AllowedIDs)
 
 	loop := orchestrator.New(cfg, ghClient, runner, tg, s, log)

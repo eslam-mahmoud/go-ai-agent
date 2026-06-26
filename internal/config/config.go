@@ -43,6 +43,7 @@ type LabelsConfig struct {
 }
 
 type ClaudeConfig struct {
+	Bin                   string // path to the claude CLI binary
 	OutputFormat          string
 	MaxTurns              int
 	RunTimeout            time.Duration
@@ -77,6 +78,7 @@ type rawConfig struct {
 	Repos      []string `yaml:"repos"`
 	ContextDir string   `yaml:"context_dir"`
 	Claude     struct {
+		Bin                   string  `yaml:"bin"`
 		OutputFormat          string  `yaml:"output_format"`
 		MaxTurns              int     `yaml:"max_turns"`
 		RunTimeoutStr         string  `yaml:"run_timeout"`
@@ -145,6 +147,7 @@ func Load(configPath, envPath string) (*Config, error) {
 		Repos:      raw.Repos,
 		ContextDir: raw.ContextDir,
 		Claude: ClaudeConfig{
+			Bin:                   raw.Claude.Bin,
 			OutputFormat:          raw.Claude.OutputFormat,
 			MaxTurns:              raw.Claude.MaxTurns,
 			RunTimeout:            runTimeout,

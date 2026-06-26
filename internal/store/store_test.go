@@ -137,19 +137,22 @@ func TestListByState(t *testing.T) {
 
 func TestCountActive(t *testing.T) {
 	s := openTestStore(t)
-	_, _ = s.UpsertTask("r", 1, StateInProgress, "s")
-	_, _ = s.UpsertTask("r", 2, StateAwaitingFeedback, "s") // parked — not counted
-	_, _ = s.UpsertTask("r", 3, StateDone, "s")
-	_, _ = s.UpsertTask("r", 4, StateReady, "s")
-	_, _ = s.UpsertTask("r", 5, StateInProgress, "s") // second active Claude run
+	_, _ = s.UpsertTask("r", 1, StateInProgress, "s")            // active — counted
+	_, _ = s.UpsertTask("r", 2, StateAwaitingFeedback, "s")      // parked — not counted
+	_, _ = s.UpsertTask("r", 3, StateDone, "s")                  // done — not counted
+	_, _ = s.UpsertTask("r", 4, StateReady, "s")                 // not started — not counted
+	_, _ = s.UpsertTask("r", 5, StateInProgress, "s")            // active — counted
+	_ = s.SetCIState("r", 5, CIStateWaiting)                     // CI-watching — not counted
+	_, _ = s.UpsertTask("r", 6, StateInProgress, "s")            // genuinely active — counted
 
 	count, err := s.CountActive()
 	if err != nil {
 		t.Fatalf("CountActive: %v", err)
 	}
-	// Only in-progress tasks count; awaiting-feedback is excluded.
+	// Only in-progress tasks with ci_state='' count.
+	// Issue 1: counted. Issue 5: CI-watching, not counted. Issue 6: counted.
 	if count != 2 {
-		t.Errorf("CountActive = %d, want 2 (awaiting-feedback excluded)", count)
+		t.Errorf("CountActive = %d, want 2", count)
 	}
 }
 

@@ -214,12 +214,17 @@ func (s *Store) ListByCIState(ciState CIState) ([]*Task, error) {
 }
 
 // CountActive returns the number of tasks Claude is actively executing.
-// awaiting-feedback tasks are excluded — they are parked waiting for human
-// input and consume no Claude capacity, so they should not block new work.
+// Excluded from the count:
+//   - awaiting-feedback: parked, waiting for human input, Claude is idle
+//   - in-progress with ci_state=waiting: Claude finished, only CI polling remains
+//
+// Only tasks where Claude is genuinely running (in-progress, not CI-watching)
+// count toward the max_parallel ceiling.
 func (s *Store) CountActive() (int, error) {
 	var count int
 	err := s.db.QueryRow(`
-		SELECT COUNT(*) FROM tasks WHERE state = 'in-progress'
+		SELECT COUNT(*) FROM tasks
+		WHERE state = 'in-progress' AND ci_state = ''
 	`).Scan(&count)
 	return count, err
 }

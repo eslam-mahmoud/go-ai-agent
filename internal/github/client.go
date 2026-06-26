@@ -55,18 +55,24 @@ func (c *githubClient) ListReadyIssues(ctx context.Context, owner, repo, readyLa
 	opts := &gh.IssueListByRepoOptions{
 		State:  "open",
 		Labels: []string{readyLabel},
-		ListOptions: gh.ListOptions{PerPage: 50},
-	}
-	ghIssues, _, err := c.gh.Issues.ListByRepo(ctx, owner, repo, opts)
-	if err != nil {
-		return nil, fmt.Errorf("list issues: %w", err)
+		ListOptions: gh.ListOptions{PerPage: 100},
 	}
 	var issues []*Issue
-	for _, i := range ghIssues {
-		if i.PullRequestLinks != nil {
-			continue // skip PRs
+	for {
+		ghIssues, resp, err := c.gh.Issues.ListByRepo(ctx, owner, repo, opts)
+		if err != nil {
+			return nil, fmt.Errorf("list issues: %w", err)
 		}
-		issues = append(issues, toIssue(i))
+		for _, i := range ghIssues {
+			if i.PullRequestLinks != nil {
+				continue // skip PRs
+			}
+			issues = append(issues, toIssue(i))
+		}
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
 	}
 	return issues, nil
 }
@@ -86,19 +92,25 @@ func (c *githubClient) GetComments(ctx context.Context, owner, repo string, numb
 		Since:     since,
 		ListOptions: gh.ListOptions{PerPage: 100},
 	}
-	ghComments, _, err := c.gh.Issues.ListComments(ctx, owner, repo, number, opts)
-	if err != nil {
-		return nil, fmt.Errorf("list comments: %w", err)
-	}
 	var comments []*Comment
-	for _, c := range ghComments {
-		comments = append(comments, &Comment{
-			ID:        c.GetID(),
-			Body:      c.GetBody(),
-			Author:    c.GetUser().GetLogin(),
-			CreatedAt: c.GetCreatedAt().Time,
-			HTMLURL:   c.GetHTMLURL(),
-		})
+	for {
+		ghComments, resp, err := c.gh.Issues.ListComments(ctx, owner, repo, number, opts)
+		if err != nil {
+			return nil, fmt.Errorf("list comments: %w", err)
+		}
+		for _, c := range ghComments {
+			comments = append(comments, &Comment{
+				ID:        c.GetID(),
+				Body:      c.GetBody(),
+				Author:    c.GetUser().GetLogin(),
+				CreatedAt: c.GetCreatedAt().Time,
+				HTMLURL:   c.GetHTMLURL(),
+			})
+		}
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
 	}
 	return comments, nil
 }

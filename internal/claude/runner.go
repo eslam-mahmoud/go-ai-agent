@@ -209,11 +209,17 @@ func detectClarification(output string) (bool, string) {
 }
 
 // BuildFirstRunPrompt creates the prompt for the first invocation of a task.
-func BuildFirstRunPrompt(issueTitle, issueBody, threadComments string) string {
+// issueNumber is used to derive the required branch name so CI watching works.
+func BuildFirstRunPrompt(issueTitle, issueBody, threadComments string, issueNumber int) string {
+	branch := fmt.Sprintf("madar/issue-%d", issueNumber)
 	var sb strings.Builder
 	sb.WriteString("You are working on the following GitHub Issue task. Complete the task fully and autonomously.\n\n")
-	sb.WriteString("IMPORTANT: If you need clarification from the maintainer before you can proceed, respond with exactly:\n")
-	sb.WriteString("NEEDS_CLARIFICATION: <your question here>\n\n")
+	sb.WriteString("IMPORTANT RULES:\n")
+	sb.WriteString(fmt.Sprintf("1. Create a branch named exactly `%s` for all your changes.\n", branch))
+	sb.WriteString("2. Commit your changes to that branch and push it.\n")
+	sb.WriteString("3. Open a pull request from that branch and include 'PR: #<number>' (e.g. 'PR: #42') on its own line in your final response so the CI watcher can track it.\n")
+	sb.WriteString("4. If you need clarification before proceeding, respond with exactly:\n")
+	sb.WriteString("   NEEDS_CLARIFICATION: <your question here>\n\n")
 	sb.WriteString("Otherwise, complete the task and summarize what you did.\n\n")
 	sb.WriteString("---\n")
 	sb.WriteString("Title: ")

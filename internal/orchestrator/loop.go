@@ -194,7 +194,7 @@ func (l *Loop) pickAndRun(ctx context.Context) error {
 		// Build first-run prompt from issue + thread.
 		comments, _ := l.gh.GetComments(ctx, owner, repo, issue.Number, nil)
 		threadStr := formatThread(comments)
-		prompt := claude.BuildFirstRunPrompt(issue.Title, issue.Body, threadStr)
+		prompt := claude.BuildFirstRunPrompt(issue.Title, issue.Body, threadStr, issue.Number)
 
 		return l.runClaude(ctx, owner, repo, issue.Number, issue, sessionID, prompt, false)
 	}

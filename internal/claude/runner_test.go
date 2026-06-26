@@ -184,7 +184,7 @@ also not json
 }
 
 func TestBuildFirstRunPrompt(t *testing.T) {
-	prompt := BuildFirstRunPrompt("Add rate limiting", "Per-IP, 5/min", "some comments")
+	prompt := BuildFirstRunPrompt("Add rate limiting", "Per-IP, 5/min", "some comments", 42)
 	if !strings.Contains(prompt, "Add rate limiting") {
 		t.Error("prompt missing title")
 	}
@@ -193,6 +193,12 @@ func TestBuildFirstRunPrompt(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "some comments") {
 		t.Error("prompt missing thread")
+	}
+	if !strings.Contains(prompt, "madar/issue-42") {
+		t.Error("prompt missing branch name")
+	}
+	if !strings.Contains(prompt, "PR: #") {
+		t.Error("prompt missing PR reporting instruction")
 	}
 }
 

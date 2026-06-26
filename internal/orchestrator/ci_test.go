@@ -192,6 +192,47 @@ func TestCheckCIPending_exhaustsRetries(t *testing.T) {
 	}
 }
 
+func TestCheckCIPending_waitTimeoutExceeded(t *testing.T) {
+	cfg := testConfig()
+	cfg.CI.Enabled = true
+	cfg.CI.MaxRetries = 3
+	cfg.CI.WaitTimeout = time.Millisecond // immediately expire
+	s := testStore(t)
+
+	_, _ = s.UpsertTask("owner/repo", 6, store.StateInProgress, "sess")
+	_ = s.SetCIState("owner/repo", 6, store.CIStateWaiting)
+	// Backdate UpdatedAt so timeout is exceeded.
+	// Force by sleeping past the 1ms timeout.
+	time.Sleep(5 * time.Millisecond)
+
+	tg := &fakeTelegram{}
+	gh := &fakeGitHubCI{
+		fakeGitHub: fakeGitHub{
+			issues: []*githubclient.Issue{
+				{Number: 6, HTMLURL: "url", Labels: []string{"in-progress"}},
+			},
+		},
+		checkStatus: githubclient.CheckPending, // CI still pending but timeout exceeded
+	}
+	loop := testLoop(t, gh, &fakeRunner{result: &claude.Result{Output: "ok"}}, tg, s)
+	loop.cfg = cfg
+
+	if err := loop.checkCIPending(context.Background()); err != nil {
+		t.Fatalf("checkCIPending: %v", err)
+	}
+
+	task, _ := s.GetTask("owner/repo", 6)
+	if task.CIState != store.CIStateGaveUp {
+		t.Errorf("CI state = %q after timeout, want gave_up", task.CIState)
+	}
+	if task.State != store.StateAwaitingFeedback {
+		t.Errorf("task state = %q after timeout, want awaiting-feedback", task.State)
+	}
+	if !tg.clarificationCalled {
+		t.Error("human should be notified on CI timeout")
+	}
+}
+
 func TestExtractPRNumber(t *testing.T) {
 	cases := []struct {
 		output string

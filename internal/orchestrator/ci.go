@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/eslam-mahmoud/go-ai-agent/internal/claude"
 	githubclient "github.com/eslam-mahmoud/go-ai-agent/internal/github"
@@ -39,6 +40,16 @@ func (l *Loop) checkCIPending(ctx context.Context) error {
 }
 
 func (l *Loop) advanceCITask(ctx context.Context, owner, repo string, task *store.Task) error {
+	// Enforce wait_timeout: if the task has been CI-waiting longer than the
+	// configured limit, escalate to a human rather than waiting indefinitely.
+	if l.cfg.CI.WaitTimeout > 0 && time.Since(task.UpdatedAt) > l.cfg.CI.WaitTimeout {
+		l.log.Warn("CI wait_timeout exceeded, escalating",
+			"repo", task.Repo, "issue", task.IssueNumber,
+			"waited", time.Since(task.UpdatedAt).Round(time.Second),
+			"timeout", l.cfg.CI.WaitTimeout)
+		return l.giveCIUpToHuman(ctx, owner, repo, task)
+	}
+
 	branch := fmt.Sprintf("madar/issue-%d", task.IssueNumber)
 
 	status, err := l.gh.GetCheckSuiteStatus(ctx, owner, repo, branch)

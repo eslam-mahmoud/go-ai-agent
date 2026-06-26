@@ -168,13 +168,20 @@ func (c *githubClient) CloseIssue(ctx context.Context, owner, repo string, numbe
 }
 
 func (c *githubClient) EnsureLabels(ctx context.Context, owner, repo string, labels map[string]string) error {
-	existing, _, err := c.gh.Issues.ListLabels(ctx, owner, repo, &gh.ListOptions{PerPage: 100})
-	if err != nil {
-		return fmt.Errorf("list labels: %w", err)
-	}
 	existingSet := make(map[string]bool)
-	for _, l := range existing {
-		existingSet[l.GetName()] = true
+	opts := &gh.ListOptions{PerPage: 100}
+	for {
+		page, resp, err := c.gh.Issues.ListLabels(ctx, owner, repo, opts)
+		if err != nil {
+			return fmt.Errorf("list labels: %w", err)
+		}
+		for _, l := range page {
+			existingSet[l.GetName()] = true
+		}
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
 	}
 	for name, color := range labels {
 		if !existingSet[name] {

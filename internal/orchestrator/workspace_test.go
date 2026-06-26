@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -52,4 +53,43 @@ func TestEnsureWorkspaces_emptyRepos(t *testing.T) {
 	if err := EnsureWorkspaces(context.Background(), cfg, log); err != nil {
 		t.Fatalf("EnsureWorkspaces with no repos: %v", err)
 	}
+}
+
+func TestPullWorkspace_nonExistentDir(t *testing.T) {
+	cfg := testConfig()
+	cfg.WorkspaceDir = t.TempDir() // workspace dir exists but repo subdir does not
+	s := testStore(t)
+	loop := testLoop(t, &fakeGitHub{}, &fakeRunner{result: nil}, &fakeTelegram{}, s)
+	loop.cfg = cfg
+
+	// Should not panic or error — missing workspace is silently skipped.
+	loop.pullWorkspace(context.Background(), "owner", "repo")
+}
+
+func TestPullWorkspace_validGitRepo(t *testing.T) {
+	// Create a minimal local bare repo and clone it, then test pull.
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "bare.git")
+	clone := filepath.Join(dir, "workspaces", "owner", "repo")
+
+	// Init bare repo.
+	if out, err := exec.Command("git", "init", "--bare", bare).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v\n%s", err, out)
+	}
+	// Clone it.
+	if err := os.MkdirAll(filepath.Dir(clone), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "clone", bare, clone).CombinedOutput(); err != nil {
+		t.Fatalf("git clone: %v\n%s", err, out)
+	}
+
+	cfg := testConfig()
+	cfg.WorkspaceDir = filepath.Join(dir, "workspaces")
+	s := testStore(t)
+	loop := testLoop(t, &fakeGitHub{}, &fakeRunner{result: nil}, &fakeTelegram{}, s)
+	loop.cfg = cfg
+
+	// Pull on an empty bare repo should succeed (already up to date).
+	loop.pullWorkspace(context.Background(), "owner", "repo")
 }

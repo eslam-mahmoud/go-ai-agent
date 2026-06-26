@@ -12,6 +12,22 @@ import (
 	githubclient "github.com/eslam-mahmoud/go-ai-agent/internal/github"
 )
 
+// pullWorkspace runs git pull --ff-only on the workspace for owner/repo.
+// Failures are logged as warnings and do not block task execution.
+func (l *Loop) pullWorkspace(ctx context.Context, owner, repo string) {
+	workDir := filepath.Join(l.cfg.WorkspaceDir, owner, repo)
+	if _, err := os.Stat(workDir); err != nil {
+		return // not cloned yet — EnsureWorkspaces will handle it
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", workDir, "pull", "--ff-only")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		l.log.Warn("git pull failed, continuing with existing workspace",
+			"repo", owner+"/"+repo, "err", err, "output", string(out))
+	} else {
+		l.log.Debug("workspace pulled", "repo", owner+"/"+repo)
+	}
+}
+
 // EnsureWorkspaces clones any repo listed in cfg.Repos whose local workspace
 // directory does not yet exist. It is idempotent: already-cloned repos are skipped.
 func EnsureWorkspaces(ctx context.Context, cfg *config.Config, log *slog.Logger) error {

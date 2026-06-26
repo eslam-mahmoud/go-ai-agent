@@ -191,6 +191,9 @@ func (l *Loop) pickAndRun(ctx context.Context) error {
 			l.log.Error("transition labels", "err", err)
 		}
 
+		// Pull latest changes so Claude works against current main.
+		l.pullWorkspace(ctx, owner, repo)
+
 		// Build first-run prompt from issue + thread.
 		comments, _ := l.gh.GetComments(ctx, owner, repo, issue.Number, nil)
 		threadStr := formatThread(comments)

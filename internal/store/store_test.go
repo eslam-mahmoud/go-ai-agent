@@ -103,6 +103,16 @@ func TestPruneAuditLog_keepsRecent(t *testing.T) {
 	}
 }
 
+func TestOpen_createsParentDirs(t *testing.T) {
+	// Path inside a non-existent subdirectory — Open() must create it.
+	path := filepath.Join(t.TempDir(), "new_subdir", "test.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open with non-existent parent dir: %v", err)
+	}
+	s.Close()
+}
+
 func TestMigration_setsVersion(t *testing.T) {
 	s := openTestStore(t)
 	v, err := s.SchemaVersion()

@@ -225,12 +225,35 @@ func TestBuildFirstRunPrompt_noLimitWhenZero(t *testing.T) {
 }
 
 func TestBuildResumePrompt(t *testing.T) {
-	prompt := BuildResumePrompt("Use per-IP, 5 req/min")
+	entries := []ReplyEntry{
+		{Author: "alice", Body: "Use per-IP, 5 req/min", Timestamp: "2024-01-01T10:00:00Z"},
+	}
+	prompt := BuildResumePrompt(entries)
 	if !strings.Contains(prompt, "Use per-IP") {
 		t.Error("resume prompt missing human reply")
 	}
+	if !strings.Contains(prompt, "alice") {
+		t.Error("resume prompt missing author")
+	}
+	if !strings.Contains(prompt, "2024-01-01") {
+		t.Error("resume prompt missing timestamp")
+	}
 	if !strings.Contains(prompt, "Continue") {
 		t.Error("resume prompt missing continue instruction")
+	}
+}
+
+func TestBuildResumePrompt_multipleReplies(t *testing.T) {
+	entries := []ReplyEntry{
+		{Author: "alice", Body: "Use per-IP", Timestamp: "2024-01-01T10:00:00Z"},
+		{Author: "alice", Body: "Actually, per-account", Timestamp: "2024-01-01T10:05:00Z"},
+	}
+	prompt := BuildResumePrompt(entries)
+	if !strings.Contains(prompt, "2 messages") {
+		t.Error("multi-reply prompt should say how many messages")
+	}
+	if !strings.Contains(prompt, "per-IP") || !strings.Contains(prompt, "per-account") {
+		t.Error("multi-reply prompt should contain both replies")
 	}
 }
 

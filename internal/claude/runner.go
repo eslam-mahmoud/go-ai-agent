@@ -243,9 +243,27 @@ func BuildFirstRunPrompt(issueTitle, issueBody, threadComments string, issueNumb
 	return sb.String()
 }
 
-// BuildResumePrompt creates the prompt for resuming after a human replied.
-func BuildResumePrompt(humanReply string) string {
-	return fmt.Sprintf("Maintainer answered: %s\n\nContinue with the task.", humanReply)
+// ReplyEntry is a single human comment used in a resume prompt.
+type ReplyEntry struct {
+	Author    string
+	Body      string
+	Timestamp string // RFC3339
+}
+
+// BuildResumePrompt creates the prompt for resuming after one or more human replies.
+// Each entry is formatted with author and timestamp so Claude has full attribution.
+func BuildResumePrompt(replies []ReplyEntry) string {
+	var sb strings.Builder
+	if len(replies) == 1 {
+		sb.WriteString("Maintainer replied:\n\n")
+	} else {
+		sb.WriteString(fmt.Sprintf("Maintainer replied (%d messages):\n\n", len(replies)))
+	}
+	for _, r := range replies {
+		sb.WriteString(fmt.Sprintf("@%s (%s):\n%s\n\n", r.Author, r.Timestamp, r.Body))
+	}
+	sb.WriteString("Continue with the task based on this input.")
+	return sb.String()
 }
 
 // BuildCIFixPrompt creates the prompt sent to Claude when CI fails.

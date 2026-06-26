@@ -244,7 +244,7 @@ func (l *Loop) pickAndRun(ctx context.Context) error {
 		// Build first-run prompt from issue + thread (human comments only).
 		comments, _ := l.gh.GetComments(ctx, owner, repo, issue.Number, nil)
 		threadStr := l.formatHumanThread(comments)
-		prompt := claude.BuildFirstRunPrompt(issue.Title, issue.Body, threadStr, issue.Number)
+		prompt := claude.BuildFirstRunPrompt(issue.Title, issue.Body, threadStr, issue.Number, l.cfg.Claude.MaxIssueBodyChars)
 
 		return l.runClaude(ctx, owner, repo, issue.Number, issue, sessionID, prompt, false)
 	}

@@ -23,6 +23,7 @@ claude:
   context_reset_threshold: 0.6  # fraction of model window at which to checkpoint and rotate
   skip_permissions: true      # trusted single-user box — skip interactive permission prompts
   max_thread_chars: 8000      # max chars of human thread passed to first-run prompt (oldest omitted first)
+  max_issue_body_chars: 4000  # max chars of issue body in first-run prompt (truncated with marker)
 
 ci:
   enabled: false       # set true to enable CI/CD feedback loop

@@ -209,8 +209,9 @@ func detectClarification(output string) (bool, string) {
 }
 
 // BuildFirstRunPrompt creates the prompt for the first invocation of a task.
-// issueNumber is used to derive the required branch name so CI watching works.
-func BuildFirstRunPrompt(issueTitle, issueBody, threadComments string, issueNumber int) string {
+// issueNumber derives the required branch name; maxBodyChars truncates the
+// issue body if it exceeds the limit (0 = no limit).
+func BuildFirstRunPrompt(issueTitle, issueBody, threadComments string, issueNumber, maxBodyChars int) string {
 	branch := fmt.Sprintf("madar/issue-%d", issueNumber)
 	var sb strings.Builder
 	sb.WriteString("You are working on the following GitHub Issue task. Complete the task fully and autonomously.\n\n")
@@ -226,8 +227,12 @@ func BuildFirstRunPrompt(issueTitle, issueBody, threadComments string, issueNumb
 	sb.WriteString(issueTitle)
 	sb.WriteString("\n\n")
 	if issueBody != "" {
+		body := issueBody
+		if maxBodyChars > 0 && len(body) > maxBodyChars {
+			body = body[:maxBodyChars] + "\n[truncated — see issue for full description]"
+		}
 		sb.WriteString("Description:\n")
-		sb.WriteString(issueBody)
+		sb.WriteString(body)
 		sb.WriteString("\n\n")
 	}
 	if threadComments != "" {

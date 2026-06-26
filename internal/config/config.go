@@ -50,6 +50,7 @@ type ClaudeConfig struct {
 	ContextResetThreshold float64
 	SkipPermissions       bool
 	MaxThreadChars        int // max chars of human thread passed to first-run prompt
+	MaxIssueBodyChars     int // max chars of issue body passed to first-run prompt
 }
 
 type GitHubConfig struct {
@@ -83,6 +84,7 @@ type rawConfig struct {
 		ContextResetThreshold float64 `yaml:"context_reset_threshold"`
 		SkipPermissions       bool    `yaml:"skip_permissions"`
 		MaxThreadChars        int     `yaml:"max_thread_chars"`
+		MaxIssueBodyChars     int     `yaml:"max_issue_body_chars"`
 	} `yaml:"claude"`
 	CI struct {
 		Enabled          bool   `yaml:"enabled"`
@@ -150,6 +152,7 @@ func Load(configPath, envPath string) (*Config, error) {
 			ContextResetThreshold: raw.Claude.ContextResetThreshold,
 			SkipPermissions:       raw.Claude.SkipPermissions,
 			MaxThreadChars:        raw.Claude.MaxThreadChars,
+			MaxIssueBodyChars:     raw.Claude.MaxIssueBodyChars,
 		},
 		GitHub: GitHubConfig{
 			Token: os.Getenv("GITHUB_TOKEN"),
@@ -207,6 +210,9 @@ func applyDefaults(raw *rawConfig) {
 	}
 	if raw.Claude.MaxThreadChars == 0 {
 		raw.Claude.MaxThreadChars = 8000
+	}
+	if raw.Claude.MaxIssueBodyChars == 0 {
+		raw.Claude.MaxIssueBodyChars = 4000
 	}
 	if raw.CI.MaxRetries == 0 {
 		raw.CI.MaxRetries = 3

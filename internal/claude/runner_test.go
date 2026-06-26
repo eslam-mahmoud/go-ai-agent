@@ -184,7 +184,7 @@ also not json
 }
 
 func TestBuildFirstRunPrompt(t *testing.T) {
-	prompt := BuildFirstRunPrompt("Add rate limiting", "Per-IP, 5/min", "some comments", 42)
+	prompt := BuildFirstRunPrompt("Add rate limiting", "Per-IP, 5/min", "some comments", 42, 0)
 	if !strings.Contains(prompt, "Add rate limiting") {
 		t.Error("prompt missing title")
 	}
@@ -199,6 +199,28 @@ func TestBuildFirstRunPrompt(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "PR: #") {
 		t.Error("prompt missing PR reporting instruction")
+	}
+}
+
+func TestBuildFirstRunPrompt_truncatesBody(t *testing.T) {
+	longBody := strings.Repeat("x", 5000)
+	prompt := BuildFirstRunPrompt("Title", longBody, "", 1, 100)
+	if strings.Contains(prompt, longBody) {
+		t.Error("prompt should not contain full long body")
+	}
+	if !strings.Contains(prompt, "truncated") {
+		t.Error("prompt should contain truncation marker")
+	}
+	if !strings.Contains(prompt, strings.Repeat("x", 100)) {
+		t.Error("prompt should contain first 100 chars of body")
+	}
+}
+
+func TestBuildFirstRunPrompt_noLimitWhenZero(t *testing.T) {
+	body := strings.Repeat("y", 5000)
+	prompt := BuildFirstRunPrompt("Title", body, "", 1, 0)
+	if !strings.Contains(prompt, body) {
+		t.Error("with limit=0, full body should be included")
 	}
 }
 

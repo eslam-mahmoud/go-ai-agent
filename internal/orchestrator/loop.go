@@ -26,6 +26,7 @@ type Loop struct {
 	store       *store.Store
 	log         *slog.Logger
 	lastPruneAt time.Time
+	botUsername  string // GitHub login of the authenticated token
 }
 
 func New(
@@ -48,6 +49,15 @@ func New(
 
 // Run starts the poll loop and blocks until ctx is cancelled.
 func (l *Loop) Run(ctx context.Context) error {
+	// Resolve the GitHub username of the authenticated token once on startup.
+	// Used to filter Madar's own comments from human reply detection.
+	if username, err := l.gh.GetAuthenticatedUsername(ctx); err != nil {
+		l.log.Warn("could not resolve bot GitHub username, falling back to body-prefix filter", "err", err)
+	} else {
+		l.botUsername = username
+		l.log.Info("bot username resolved", "username", username)
+	}
+
 	l.log.Info("madar starting", "poll_interval", l.cfg.PollInterval)
 	ticker := time.NewTicker(l.cfg.PollInterval)
 	defer ticker.Stop()
@@ -149,10 +159,18 @@ func (l *Loop) resumeIfReplied(ctx context.Context, owner, repo string, task *st
 	// Find first comment not from a bot / our own agent.
 	var humanReply string
 	for _, c := range comments {
-		if c.Author != "" && !isAgentComment(c.Body) {
-			humanReply = c.Body
-			break
+		if c.Author == "" {
+			continue
 		}
+		// Skip Madar's own comments by username (primary) and body prefix (fallback).
+		if l.botUsername != "" && c.Author == l.botUsername {
+			continue
+		}
+		if isAgentComment(c.Body) {
+			continue
+		}
+		humanReply = c.Body
+		break
 	}
 	if humanReply == "" {
 		return nil

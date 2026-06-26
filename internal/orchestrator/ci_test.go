@@ -276,6 +276,9 @@ func TestStartCIWatch(t *testing.T) {
 // Delegate everything else to fakeGitHub.
 var _ githubclient.Client = (*fakeGitHubCI)(nil)
 
+func (f *fakeGitHubCI) GetAuthenticatedUsername(_ context.Context) (string, error) {
+	return "madar-bot", nil
+}
 func (f *fakeGitHubCI) ListReadyIssues(ctx context.Context, o, r, l string) ([]*githubclient.Issue, error) {
 	return f.fakeGitHub.ListReadyIssues(ctx, o, r, l)
 }

@@ -27,6 +27,7 @@ type Comment struct {
 }
 
 type Client interface {
+	GetAuthenticatedUsername(ctx context.Context) (string, error)
 	ListReadyIssues(ctx context.Context, owner, repo, readyLabel string) ([]*Issue, error)
 	GetIssue(ctx context.Context, owner, repo string, number int) (*Issue, error)
 	GetComments(ctx context.Context, owner, repo string, number int, since *time.Time) ([]*Comment, error)
@@ -49,6 +50,14 @@ func New(token string) Client {
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
 	tc := oauth2.NewClient(context.Background(), ts)
 	return &githubClient{gh: gh.NewClient(tc)}
+}
+
+func (c *githubClient) GetAuthenticatedUsername(ctx context.Context) (string, error) {
+	user, _, err := c.gh.Users.Get(ctx, "")
+	if err != nil {
+		return "", fmt.Errorf("get authenticated user: %w", err)
+	}
+	return user.GetLogin(), nil
 }
 
 func (c *githubClient) ListReadyIssues(ctx context.Context, owner, repo, readyLabel string) ([]*Issue, error) {

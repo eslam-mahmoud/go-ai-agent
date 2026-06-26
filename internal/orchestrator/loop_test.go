@@ -25,6 +25,9 @@ type fakeGitHub struct {
 	labelsSet    []string
 }
 
+func (f *fakeGitHub) GetAuthenticatedUsername(_ context.Context) (string, error) {
+	return "madar-bot", nil
+}
 func (f *fakeGitHub) ListReadyIssues(_ context.Context, _, _, _ string) ([]*githubclient.Issue, error) {
 	return f.issues, nil
 }
@@ -397,6 +400,39 @@ func TestTick_capacityGuard(t *testing.T) {
 	task, _ := s.GetTask("owner/repo", 3)
 	if task != nil {
 		t.Errorf("issue 3 should not have been claimed while another is active, state=%q", task.State)
+	}
+}
+
+func TestResumeIfReplied_skipsBotCommentByUsername(t *testing.T) {
+	clarTime := time.Now().UTC().Add(-10 * time.Minute)
+	gh := &fakeGitHub{
+		// First comment is from the bot itself (madar-bot), second from a human.
+		comments: []*githubclient.Comment{
+			{Body: "Some bot comment", Author: "madar-bot", CreatedAt: clarTime.Add(time.Minute)},
+			{Body: "Human answer here", Author: "human-user", CreatedAt: clarTime.Add(2 * time.Minute)},
+		},
+	}
+	runner := &fakeRunner{result: &claude.Result{Output: "done"}}
+	tg := &fakeTelegram{}
+	s := testStore(t)
+
+	_, _ = s.UpsertTask("owner/repo", 50, store.StateAwaitingFeedback, "sess-50")
+	_ = s.SetClarificationTime("owner/repo", 50, clarTime)
+
+	loop := testLoop(t, gh, runner, tg, s)
+	loop.botUsername = "madar-bot" // simulate resolved username
+
+	if err := loop.checkAwaitingFeedback(context.Background()); err != nil {
+		t.Fatalf("checkAwaitingFeedback: %v", err)
+	}
+
+	task, _ := s.GetTask("owner/repo", 50)
+	if task == nil {
+		t.Fatal("task not found")
+	}
+	// Should have resumed from the human comment, not the bot comment.
+	if task.State != store.StateDone {
+		t.Errorf("state = %q, want done (resumed from human reply)", task.State)
 	}
 }
 

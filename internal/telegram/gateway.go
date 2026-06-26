@@ -96,7 +96,12 @@ type sendMessageRequest struct {
 	ParseMode string `json:"parse_mode"`
 }
 
+const telegramMaxLen = 4096
+
 func (g *gateway) send(ctx context.Context, chatID, text string) error {
+	if len(text) > telegramMaxLen {
+		text = text[:telegramMaxLen-15] + "\n…[truncated]"
+	}
 	payload, err := json.Marshal(sendMessageRequest{
 		ChatID:    chatID,
 		Text:      text,
@@ -125,10 +130,11 @@ func (g *gateway) send(ctx context.Context, chatID, text string) error {
 	return nil
 }
 
-// escapeMarkdown escapes Telegram MarkdownV1 special characters.
+// escapeMarkdown escapes all Telegram MarkdownV1 special characters.
 func escapeMarkdown(s string) string {
-	// For MarkdownV1, only * _ ` [ need escaping
 	s = strings.ReplaceAll(s, "_", "\\_")
+	s = strings.ReplaceAll(s, "*", "\\*")
+	s = strings.ReplaceAll(s, "`", "\\`")
 	s = strings.ReplaceAll(s, "[", "\\[")
 	return s
 }

@@ -125,13 +125,44 @@ func TestEscapeMarkdown(t *testing.T) {
 		{"hello", "hello"},
 		{"under_score", "under\\_score"},
 		{"[link]", "\\[link]"},
+		{"*bold*", "\\*bold\\*"},
+		{"`code`", "\\`code\\`"},
 		{"normal text", "normal text"},
+		{"_*`[all", "\\_\\*\\`\\[all"},
 	}
 	for _, tc := range cases {
 		got := escapeMarkdown(tc.input)
 		if got != tc.want {
 			t.Errorf("escapeMarkdown(%q) = %q, want %q", tc.input, got, tc.want)
 		}
+	}
+}
+
+func TestGateway_truncatesLongMessage(t *testing.T) {
+	var received []sendMessageRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req sendMessageRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		received = append(received, req)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	gw := NewWithBase("tok", []string{"1"}, srv.URL, srv.Client())
+	// Build a message longer than 4096 bytes.
+	longSummary := strings.Repeat("a", 5000)
+	if err := gw.NotifyCompletion(context.Background(), "https://github.com/x/y/issues/1", longSummary); err != nil {
+		t.Fatalf("NotifyCompletion: %v", err)
+	}
+	if len(received) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(received))
+	}
+	if len(received[0].Text) > telegramMaxLen {
+		t.Errorf("message length %d exceeds Telegram limit %d", len(received[0].Text), telegramMaxLen)
+	}
+	if !strings.Contains(received[0].Text, "truncated") {
+		t.Error("truncated message should contain truncation marker")
 	}
 }
 

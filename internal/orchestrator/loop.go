@@ -420,10 +420,10 @@ func (l *Loop) getIssueLabels(ctx context.Context, owner, repo string, issueNumb
 }
 
 // formatHumanThread formats only human comments for inclusion in Claude's prompt.
-// Madar's own comments (clarification questions, completion summaries) are excluded
-// to avoid wasting context tokens and confusing Claude with its own prior output.
+// Bot comments are excluded. If the total exceeds MaxThreadChars, the oldest
+// comments are dropped (most recent are most relevant to the current task).
 func (l *Loop) formatHumanThread(comments []*githubclient.Comment) string {
-	var sb strings.Builder
+	var human []string
 	for _, c := range comments {
 		if c.Author == "" {
 			continue
@@ -434,8 +434,31 @@ func (l *Loop) formatHumanThread(comments []*githubclient.Comment) string {
 		if isAgentComment(c.Body) {
 			continue
 		}
-		sb.WriteString(fmt.Sprintf("@%s (%s):\n%s\n\n",
+		human = append(human, fmt.Sprintf("@%s (%s):\n%s\n\n",
 			c.Author, c.CreatedAt.Format(time.RFC3339), c.Body))
+	}
+
+	maxChars := l.cfg.Claude.MaxThreadChars
+	if maxChars <= 0 {
+		maxChars = 8000
+	}
+
+	// Build from most recent backward, then reverse to keep chronological order.
+	var sb strings.Builder
+	used := 0
+	start := 0
+	for i := len(human) - 1; i >= 0; i-- {
+		if used+len(human[i]) > maxChars {
+			start = i + 1
+			break
+		}
+		used += len(human[i])
+	}
+	if start > 0 {
+		sb.WriteString(fmt.Sprintf("[%d earlier comment(s) omitted]\n\n", start))
+	}
+	for _, entry := range human[start:] {
+		sb.WriteString(entry)
 	}
 	return sb.String()
 }

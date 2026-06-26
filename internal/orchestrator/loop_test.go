@@ -532,6 +532,33 @@ func TestFormatHumanThread_emptyWhenAllBot(t *testing.T) {
 	}
 }
 
+func TestFormatHumanThread_truncatesOldestFirst(t *testing.T) {
+	s := testStore(t)
+	loop := testLoop(t, &fakeGitHub{}, &fakeRunner{result: nil}, &fakeTelegram{}, s)
+	// Allow enough chars for the most recent comment but not all three.
+	// Each entry is roughly "@human (timestamp):\n<body>\n\n" = ~50+ chars.
+	// Set limit to 120 — fits one entry but not three.
+	loop.cfg.Claude.MaxThreadChars = 120
+
+	now := time.Now()
+	comments := []*githubclient.Comment{
+		{Author: "human", Body: "first old comment that should be dropped", CreatedAt: now.Add(-2 * time.Hour)},
+		{Author: "human", Body: "second older comment also dropped", CreatedAt: now.Add(-time.Hour)},
+		{Author: "human", Body: "most recent comment", CreatedAt: now},
+	}
+	result := loop.formatHumanThread(comments)
+
+	if !containsStr(result, "most recent comment") {
+		t.Errorf("most recent comment should be included; got: %q", result)
+	}
+	if containsStr(result, "first old comment that should be dropped") {
+		t.Error("oldest comment should have been truncated")
+	}
+	if !containsStr(result, "omitted") {
+		t.Errorf("expected omission marker when comments were truncated; got: %q", result)
+	}
+}
+
 func TestFormatThread(t *testing.T) {
 	comments := []*githubclient.Comment{
 		{Author: "alice", Body: "first comment", CreatedAt: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)},

@@ -280,15 +280,33 @@ install_binary() {
         chmod +x "$BIN_PATH"
     else
         # Fallback: build from source
-        warn "No pre-built release found — building from source (requires Go)"
-        require_cmd go
+        warn "No pre-built release found for ${PLATFORM}-${GOARCH} — building from source"
         local tmpdir
         tmpdir=$(mktemp -d)
+        info "Cloning source…"
         git clone --depth=1 "https://github.com/$REPO.git" "$tmpdir/src"
-        (cd "$tmpdir/src" && make release && cp madar-linux-amd64 "$BIN_PATH" 2>/dev/null) || \
-        (cd "$tmpdir/src" && make build && cp madar "$BIN_PATH")
-        chmod +x "$BIN_PATH"
+
+        # Auto-install Go if missing — read required version from go.mod
+        if ! has_cmd go; then
+            local go_version
+            go_version=$(grep '^go ' "$tmpdir/src/go.mod" | awk '{print $2}')
+            info "Installing Go ${go_version}…"
+            curl -fsSL "https://go.dev/dl/go${go_version}.linux-${GOARCH}.tar.gz" \
+                | run_privileged tar -xz -C /usr/local
+            export PATH="/usr/local/go/bin:$PATH"
+            has_cmd go || die "Go installation failed. Install Go ${go_version}+ manually and retry."
+        fi
+
+        info "Building Madar from source (this may take a minute)…"
+        local built=false
+        (cd "$tmpdir/src" && \
+            GOOS=linux GOARCH="${GOARCH}" \
+            go build -trimpath -ldflags "-s -w" -o "$BIN_PATH" ./cmd/madar/ && \
+            built=true) || true
+
         rm -rf "$tmpdir"
+        [[ "$built" == "true" ]] || die "Build failed. Check errors above."
+        chmod +x "$BIN_PATH"
     fi
 
     step_done binary

@@ -17,9 +17,7 @@ const (
 )
 
 // GetCheckSuiteStatus returns the aggregate CI status for the latest commit on a branch.
-// It looks up all check runs associated with the most recent commit on the given branch ref.
 func (c *githubClient) GetCheckSuiteStatus(ctx context.Context, owner, repo, branch string) (CheckStatus, error) {
-	// Get the branch to find the latest commit SHA.
 	branchInfo, _, err := c.gh.Repositories.GetBranch(ctx, owner, repo, branch, 0)
 	if err != nil {
 		return CheckPending, fmt.Errorf("get branch %q: %w", branch, err)
@@ -29,44 +27,35 @@ func (c *githubClient) GetCheckSuiteStatus(ctx context.Context, owner, repo, bra
 		return CheckPending, nil
 	}
 
-	// List all check runs for this commit.
-	runs, _, err := c.gh.Checks.ListCheckRunsForRef(ctx, owner, repo, sha, &gh.ListCheckRunsOptions{
-		ListOptions: gh.ListOptions{PerPage: 100},
-	})
+	allRuns, err := c.listAllCheckRuns(ctx, owner, repo, sha)
 	if err != nil {
-		return CheckPending, fmt.Errorf("list check runs: %w", err)
+		return CheckPending, err
 	}
 
-	if runs.GetTotal() == 0 {
+	if len(allRuns) == 0 {
 		// No CI configured — treat as success so we don't block indefinitely.
 		return CheckSuccess, nil
 	}
 
 	anyPending := false
-	for _, run := range runs.CheckRuns {
-		status := run.GetStatus()
-		conclusion := run.GetConclusion()
-
-		if status != "completed" {
+	for _, run := range allRuns {
+		if run.GetStatus() != "completed" {
 			anyPending = true
 			continue
 		}
-		// A completed run with a non-success conclusion is a failure.
-		switch conclusion {
+		switch run.GetConclusion() {
 		case "failure", "timed_out", "cancelled", "action_required":
 			return CheckFailure, nil
 		}
 	}
-
 	if anyPending {
 		return CheckPending, nil
 	}
 	return CheckSuccess, nil
 }
 
-// GetFailedStepOutput collects the annotations and output summaries from all
-// failed check runs on the branch's latest commit. This is fed back to Claude
-// so it knows exactly what broke.
+// GetFailedStepOutput collects annotations and output summaries from all
+// failed check runs on the branch's latest commit.
 func (c *githubClient) GetFailedStepOutput(ctx context.Context, owner, repo, branch string) (string, error) {
 	branchInfo, _, err := c.gh.Repositories.GetBranch(ctx, owner, repo, branch, 0)
 	if err != nil {
@@ -74,15 +63,13 @@ func (c *githubClient) GetFailedStepOutput(ctx context.Context, owner, repo, bra
 	}
 	sha := branchInfo.GetCommit().GetSHA()
 
-	runs, _, err := c.gh.Checks.ListCheckRunsForRef(ctx, owner, repo, sha, &gh.ListCheckRunsOptions{
-		ListOptions: gh.ListOptions{PerPage: 100},
-	})
+	allRuns, err := c.listAllCheckRuns(ctx, owner, repo, sha)
 	if err != nil {
-		return "", fmt.Errorf("list check runs: %w", err)
+		return "", err
 	}
 
 	var sb strings.Builder
-	for _, run := range runs.CheckRuns {
+	for _, run := range allRuns {
 		if run.GetStatus() != "completed" {
 			continue
 		}
@@ -101,7 +88,6 @@ func (c *githubClient) GetFailedStepOutput(ctx context.Context, owner, repo, bra
 				sb.WriteString("\n")
 			}
 			if out.GetText() != "" {
-				// Truncate very long outputs to keep prompts manageable.
 				text := out.GetText()
 				if len(text) > 3000 {
 					text = text[:3000] + "\n[truncated]"
@@ -111,8 +97,8 @@ func (c *githubClient) GetFailedStepOutput(ctx context.Context, owner, repo, bra
 			}
 		}
 
-		// Include annotations (inline errors).
-		annotations, _, err := c.gh.Checks.ListCheckRunAnnotations(ctx, owner, repo, run.GetID(), &gh.ListOptions{PerPage: 50})
+		// Paginate annotations.
+		annotations, err := c.listAllAnnotations(ctx, owner, repo, run.GetID())
 		if err == nil {
 			for _, a := range annotations {
 				sb.WriteString(fmt.Sprintf("- %s:%d: %s\n", a.GetPath(), a.GetStartLine(), a.GetMessage()))
@@ -125,4 +111,40 @@ func (c *githubClient) GetFailedStepOutput(ctx context.Context, owner, repo, bra
 		return "CI failed but no detailed output was available.", nil
 	}
 	return sb.String(), nil
+}
+
+// listAllCheckRuns fetches every check run for a commit SHA across all pages.
+func (c *githubClient) listAllCheckRuns(ctx context.Context, owner, repo, sha string) ([]*gh.CheckRun, error) {
+	opts := &gh.ListCheckRunsOptions{ListOptions: gh.ListOptions{PerPage: 100}}
+	var all []*gh.CheckRun
+	for {
+		result, resp, err := c.gh.Checks.ListCheckRunsForRef(ctx, owner, repo, sha, opts)
+		if err != nil {
+			return nil, fmt.Errorf("list check runs: %w", err)
+		}
+		all = append(all, result.CheckRuns...)
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return all, nil
+}
+
+// listAllAnnotations fetches every annotation for a check run across all pages.
+func (c *githubClient) listAllAnnotations(ctx context.Context, owner, repo string, checkRunID int64) ([]*gh.CheckRunAnnotation, error) {
+	opts := &gh.ListOptions{PerPage: 100}
+	var all []*gh.CheckRunAnnotation
+	for {
+		page, resp, err := c.gh.Checks.ListCheckRunAnnotations(ctx, owner, repo, checkRunID, opts)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return all, nil
 }

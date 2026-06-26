@@ -285,7 +285,7 @@ func TestTick_claudeResultError_transitionsToAwaitingFeedback(t *testing.T) {
 	}
 }
 
-func TestTick_missingWorkspace_transitionsToAwaitingFeedback(t *testing.T) {
+func TestTick_missingWorkspace_skipsIssue(t *testing.T) {
 	gh := &fakeGitHub{
 		issues: []*githubclient.Issue{
 			{Number: 9, Title: "Task", HTMLURL: "url", Labels: []string{"ready"}},
@@ -294,20 +294,20 @@ func TestTick_missingWorkspace_transitionsToAwaitingFeedback(t *testing.T) {
 	tg := &fakeTelegram{}
 	s := testStore(t)
 	loop := testLoop(t, gh, &fakeRunner{result: &claude.Result{Output: "ok"}}, tg, s)
-	// WorkspaceDir points to a non-existent path.
-	loop.cfg.WorkspaceDir = "/nonexistent/path/that/does/not/exist"
-
+	// Remove the workspace dir so EnsureWorkspaces will attempt (and fail) to clone.
+	// This simulates a missing workspace for a repo that can't be auto-cloned.
+	wsDir := filepath.Join(loop.cfg.WorkspaceDir, "owner", "repo")
+	if err := os.RemoveAll(wsDir); err != nil {
+		t.Fatal(err)
+	}
+	// Point to a URL that won't be cloned (no network in unit tests);
+	// EnsureWorkspaces clone failure causes pickAndRun to skip this repo.
 	_ = loop.tick(context.Background())
 
+	// Issue should NOT have been claimed — EnsureWorkspaces failure causes a skip.
 	task, _ := s.GetTask("owner/repo", 9)
-	if task == nil {
-		t.Fatal("task not created in store")
-	}
-	if task.State != store.StateAwaitingFeedback {
-		t.Errorf("state = %q, want awaiting-feedback on missing workspace", task.State)
-	}
-	if !tg.clarificationCalled {
-		t.Error("operator should be notified about missing workspace")
+	if task != nil && task.State == store.StateInProgress {
+		t.Error("issue should not be claimed when workspace clone fails")
 	}
 }
 

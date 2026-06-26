@@ -180,6 +180,16 @@ func (l *Loop) pickAndRun(ctx context.Context) error {
 		}
 
 		issue := issues[0] // top of list wins
+
+		// Ensure workspace exists for this specific repo before claiming.
+		// Handles repos added to config after initial startup.
+		repoCfg := *l.cfg
+		repoCfg.Repos = []string{fullRepo}
+		if err := EnsureWorkspaces(ctx, &repoCfg, l.log); err != nil {
+			l.log.Error("workspace setup failed, skipping issue", "repo", fullRepo, "err", err)
+			continue
+		}
+
 		l.log.Info("claiming issue", "repo", fullRepo, "issue", issue.Number, "title", issue.Title)
 
 		sessionID := uuid.New().String()

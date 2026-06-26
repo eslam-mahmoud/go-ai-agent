@@ -97,7 +97,7 @@ run_privileged() { $SUDO "$@"; }
 read_secret() {
     local prompt="$1" var_name="$2" val
     while true; do
-        read -rsp "  $prompt: " val; echo
+        read -rsp "  $prompt: " val </dev/tty; echo
         [[ -n "$val" ]] && break
         warn "Value cannot be empty."
     done
@@ -109,7 +109,7 @@ read_value() {
     local display_prompt="  $prompt"
     [[ -n "$default" ]] && display_prompt+=" [$default]"
     display_prompt+=": "
-    read -rp "$display_prompt" val
+    read -rp "$display_prompt" val </dev/tty
     val="${val:-$default}"
     printf -v "$var_name" '%s' "$val"
 }
@@ -332,7 +332,7 @@ configure_credentials() {
     echo "  Needs 'repo' scope. Create at: https://github.com/settings/tokens/new"
     if [[ -n "$existing_token" ]]; then
         echo "  Current: ${existing_token:0:8}… (press Enter to keep)"
-        read -rsp "  New token (hidden): " GITHUB_TOKEN; echo
+        read -rsp "  New token (hidden): " GITHUB_TOKEN </dev/tty; echo
         GITHUB_TOKEN="${GITHUB_TOKEN:-$existing_token}"
     else
         read_secret "GitHub token (hidden)" GITHUB_TOKEN
@@ -356,7 +356,7 @@ configure_credentials() {
     echo "  Create a bot at @BotFather and paste the token here."
     if [[ -n "$existing_tg_token" ]]; then
         echo "  Current: ${existing_tg_token:0:10}… (press Enter to keep)"
-        read -rsp "  New token (hidden): " TELEGRAM_BOT_TOKEN; echo
+        read -rsp "  New token (hidden): " TELEGRAM_BOT_TOKEN </dev/tty; echo
         TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-$existing_tg_token}"
     else
         read_secret "Telegram bot token (hidden)" TELEGRAM_BOT_TOKEN
@@ -410,7 +410,7 @@ configure_repos() {
     local repos=()
     while true; do
         local repo_input
-        read -rp "  Repo (or Enter to finish): " repo_input
+        read -rp "  Repo (or Enter to finish): " repo_input </dev/tty
         [[ -z "$repo_input" ]] && break
         repos+=("$repo_input")
     done

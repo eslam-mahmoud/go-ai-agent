@@ -299,6 +299,19 @@ func (s *Store) PruneAuditLog(olderThan time.Duration) (int64, error) {
 	return res.RowsAffected()
 }
 
+// PruneCompletedTasks deletes done tasks whose updated_at is older than the
+// given duration. Returns the number of rows deleted.
+func (s *Store) PruneCompletedTasks(olderThan time.Duration) (int64, error) {
+	threshold := time.Now().UTC().Add(-olderThan)
+	res, err := s.db.Exec(
+		`DELETE FROM tasks WHERE state = 'done' AND updated_at < ?`, threshold,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("prune tasks: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 func (s *Store) GetAuditLog(repo string, issueNumber int) ([]AuditEntry, error) {
 	rows, err := s.db.Query(`
 		SELECT id, repo, issue_number, event, details, created_at

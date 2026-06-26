@@ -16,6 +16,42 @@ func openTestStore(t *testing.T) *Store {
 	return s
 }
 
+func TestPruneCompletedTasks(t *testing.T) {
+	s := openTestStore(t)
+	_, _ = s.UpsertTask("r", 10, StateDone, "s1")
+	_, _ = s.UpsertTask("r", 11, StateDone, "s2")
+	_, _ = s.UpsertTask("r", 12, StateInProgress, "s3") // active — must not be deleted
+
+	// Zero retention — all done tasks qualify.
+	n, err := s.PruneCompletedTasks(0)
+	if err != nil {
+		t.Fatalf("PruneCompletedTasks: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("deleted %d rows, want 2", n)
+	}
+
+	// Active task must survive.
+	task, _ := s.GetTask("r", 12)
+	if task == nil || task.State != StateInProgress {
+		t.Error("active task should not have been pruned")
+	}
+}
+
+func TestPruneCompletedTasks_keepsRecent(t *testing.T) {
+	s := openTestStore(t)
+	_, _ = s.UpsertTask("r", 20, StateDone, "s")
+
+	// 90-day retention — just-completed task should survive.
+	n, err := s.PruneCompletedTasks(90 * 24 * time.Hour)
+	if err != nil {
+		t.Fatalf("PruneCompletedTasks: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("deleted %d rows, want 0 (task is recent)", n)
+	}
+}
+
 func TestPruneAuditLog(t *testing.T) {
 	s := openTestStore(t)
 	_, _ = s.UpsertTask("r", 1, StateInProgress, "s")

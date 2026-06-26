@@ -69,12 +69,18 @@ func (l *Loop) Run(ctx context.Context) error {
 }
 
 func (l *Loop) tick(ctx context.Context) error {
-	// Prune old audit log entries once per day.
+	// Daily housekeeping: prune old audit log entries and completed tasks.
 	if time.Since(l.lastPruneAt) > 24*time.Hour {
-		if n, err := l.store.PruneAuditLog(30 * 24 * time.Hour); err != nil {
+		const retention = 30 * 24 * time.Hour
+		if n, err := l.store.PruneAuditLog(retention); err != nil {
 			l.log.Warn("audit log prune failed", "err", err)
 		} else if n > 0 {
 			l.log.Info("pruned audit log", "rows_deleted", n)
+		}
+		if n, err := l.store.PruneCompletedTasks(retention); err != nil {
+			l.log.Warn("completed task prune failed", "err", err)
+		} else if n > 0 {
+			l.log.Info("pruned completed tasks", "rows_deleted", n)
 		}
 		l.lastPruneAt = time.Now()
 	}

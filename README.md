@@ -388,6 +388,8 @@ EnvironmentFile=/opt/madar/.env
 ExecStart=/opt/madar/madar -config /opt/madar/config.yaml -log-level info
 Restart=on-failure
 RestartSec=10s
+# Allow 120s for graceful shutdown: 30s for cleanup context + buffer for systemd
+TimeoutStopSec=120
 
 [Install]
 WantedBy=multi-user.target

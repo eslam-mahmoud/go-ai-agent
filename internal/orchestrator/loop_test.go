@@ -126,8 +126,16 @@ func testStore(t *testing.T) *store.Store {
 }
 
 func testLoop(t *testing.T, gh githubclient.Client, runner claude.Runner, tg telegram.Gateway, s *store.Store) *Loop {
+	t.Helper()
+	cfg := testConfig()
+	// Create the workspace dir so the os.Stat check in runClaude passes.
+	wsDir := filepath.Join(t.TempDir(), "workspaces", "owner", "repo")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatalf("create workspace dir: %v", err)
+	}
+	cfg.WorkspaceDir = filepath.Join(filepath.Dir(filepath.Dir(wsDir)))
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	return New(testConfig(), gh, runner, tg, s, log)
+	return New(cfg, gh, runner, tg, s, log)
 }
 
 // --- tests ---
@@ -274,6 +282,68 @@ func TestTick_claudeResultError_transitionsToAwaitingFeedback(t *testing.T) {
 	}
 	if task.State != store.StateAwaitingFeedback {
 		t.Errorf("task state = %q after result error, want awaiting-feedback", task.State)
+	}
+}
+
+func TestTick_missingWorkspace_transitionsToAwaitingFeedback(t *testing.T) {
+	gh := &fakeGitHub{
+		issues: []*githubclient.Issue{
+			{Number: 9, Title: "Task", HTMLURL: "url", Labels: []string{"ready"}},
+		},
+	}
+	tg := &fakeTelegram{}
+	s := testStore(t)
+	loop := testLoop(t, gh, &fakeRunner{result: &claude.Result{Output: "ok"}}, tg, s)
+	// WorkspaceDir points to a non-existent path.
+	loop.cfg.WorkspaceDir = "/nonexistent/path/that/does/not/exist"
+
+	_ = loop.tick(context.Background())
+
+	task, _ := s.GetTask("owner/repo", 9)
+	if task == nil {
+		t.Fatal("task not created in store")
+	}
+	if task.State != store.StateAwaitingFeedback {
+		t.Errorf("state = %q, want awaiting-feedback on missing workspace", task.State)
+	}
+	if !tg.clarificationCalled {
+		t.Error("operator should be notified about missing workspace")
+	}
+}
+
+func TestTick_ciAndFeedbackRunBeforeCountActive(t *testing.T) {
+	// Even if there are active tasks (concurrency guard would block pickAndRun),
+	// CI checks and awaiting-feedback detection must still run.
+	clarTime := time.Now().UTC().Add(-5 * time.Minute)
+	gh := &fakeGitHub{
+		comments: []*githubclient.Comment{
+			{Body: "Use per-IP", Author: "human", CreatedAt: clarTime.Add(time.Minute)},
+		},
+	}
+	runner := &fakeRunner{result: &claude.Result{Output: "done"}}
+	tg := &fakeTelegram{}
+	s := testStore(t)
+
+	// Set up an awaiting-feedback task.
+	_, _ = s.UpsertTask("owner/repo", 20, store.StateAwaitingFeedback, "sess-20")
+	_ = s.SetClarificationTime("owner/repo", 20, clarTime)
+	// Set up a second active task to trigger the capacity guard.
+	_, _ = s.UpsertTask("owner/repo", 21, store.StateInProgress, "sess-21")
+
+	loop := testLoop(t, gh, runner, tg, s)
+	if err := loop.tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+
+	// Despite being at capacity (1 in-progress), issue 20 should have been
+	// resumed because checkAwaitingFeedback runs before the capacity guard.
+	task, _ := s.GetTask("owner/repo", 20)
+	if task == nil {
+		t.Fatal("task not found")
+	}
+	// After resume + completion the state should be done.
+	if task.State != store.StateDone {
+		t.Errorf("task 20 state = %q, want done (resumed despite capacity guard)", task.State)
 	}
 }
 

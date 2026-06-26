@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -67,10 +68,24 @@ func (l *Loop) Run(ctx context.Context) error {
 }
 
 func (l *Loop) tick(ctx context.Context) error {
-	// 1. Concurrency guard.
+	// Run CI and feedback checks unconditionally — they don't need the active
+	// count and should not be skipped by a transient SQLite error.
+
+	// 1. Check CI-pending tasks.
+	if err := l.checkCIPending(ctx); err != nil {
+		l.log.Error("CI pending check failed", "err", err)
+	}
+
+	// 2. Check awaiting-feedback issues for human replies.
+	if err := l.checkAwaitingFeedback(ctx); err != nil {
+		l.log.Error("awaiting-feedback check failed", "err", err)
+	}
+
+	// 3. Concurrency guard — gate new work on the active count.
 	active, err := l.store.CountActive()
 	if err != nil {
-		return fmt.Errorf("count active: %w", err)
+		l.log.Error("count active failed", "err", err)
+		return nil // can't safely pick new work without knowing the count
 	}
 	maxParallel := 1
 	if l.cfg.Concurrency.Enabled {
@@ -78,19 +93,6 @@ func (l *Loop) tick(ctx context.Context) error {
 	}
 	if active >= maxParallel {
 		l.log.Debug("at capacity, skipping poll", "active", active, "max", maxParallel)
-	}
-
-	// 2. Check CI-pending tasks.
-	if err := l.checkCIPending(ctx); err != nil {
-		l.log.Error("CI pending check failed", "err", err)
-	}
-
-	// 3. Check awaiting-feedback issues for human replies.
-	if err := l.checkAwaitingFeedback(ctx); err != nil {
-		l.log.Error("awaiting-feedback check failed", "err", err)
-	}
-
-	if active >= maxParallel {
 		return nil
 	}
 
@@ -206,6 +208,14 @@ func (l *Loop) pickAndRun(ctx context.Context) error {
 
 func (l *Loop) runClaude(ctx context.Context, owner, repo string, issueNumber int, issue *githubclient.Issue, sessionID, prompt string, isResume bool) error {
 	workDir := filepath.Join(l.cfg.WorkspaceDir, owner, repo)
+
+	if _, err := os.Stat(workDir); err != nil {
+		missing := fmt.Errorf("workspace %s does not exist — run EnsureWorkspaces or clone manually", workDir)
+		l.log.Error("workspace missing", "path", workDir)
+		_ = l.store.Log(owner+"/"+repo, issueNumber, "error", missing.Error())
+		return l.handleClarification(ctx, owner, repo, owner+"/"+repo, issueNumber, issue,
+			fmt.Sprintf("Workspace directory is missing: `%s`\n\nPlease ensure the repo is cloned under `workspace_dir` and retry.", workDir))
+	}
 
 	opts := claude.RunOptions{
 		WorkDir:         workDir,

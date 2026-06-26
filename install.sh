@@ -3,6 +3,7 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/eslam-mahmoud/go-ai-agent/main/install.sh | bash
 #   bash install.sh                 # normal install / resume
+#   bash install.sh --update        # upgrade to the latest release
 #   bash install.sh --update-keys   # re-prompt for credentials only
 #   bash install.sh --uninstall     # remove service and binary
 
@@ -536,10 +537,12 @@ main() {
     for arg in "$@"; do
         case "$arg" in
             --update-keys)  mode="update-keys" ;;
+            --update)       mode="update" ;;
             --uninstall)    mode="uninstall" ;;
             --help|-h)
-                echo "Usage: install.sh [--update-keys | --uninstall]"
+                echo "Usage: install.sh [--update | --update-keys | --uninstall]"
                 echo "  (no args)       Install or resume a partial install"
+                echo "  --update        Download and install the latest Madar release"
                 echo "  --update-keys   Re-prompt for credentials only"
                 echo "  --uninstall     Remove the service (keeps files)"
                 exit 0
@@ -559,6 +562,76 @@ main() {
     case "$mode" in
         uninstall)
             uninstall
+            exit 0
+            ;;
+        update)
+            info "Updating Madar binary to the latest release…"
+            if [[ ! -x "$BIN_PATH" ]]; then
+                die "Madar is not installed at $BIN_PATH. Run the installer first."
+            fi
+            local old_version
+            old_version=$("$BIN_PATH" -version 2>/dev/null || echo "unknown")
+            info "Current version: $old_version"
+
+            local release_url
+            release_url=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" \
+                | grep "browser_download_url" \
+                | grep "${PLATFORM}-${GOARCH}" \
+                | cut -d'"' -f4 || true)
+
+            if [[ -z "$release_url" ]]; then
+                die "No pre-built release found for ${PLATFORM}/${GOARCH}. Check https://github.com/$REPO/releases"
+            fi
+
+            # Verify checksum before replacing binary
+            local checksums_url
+            checksums_url=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" \
+                | grep "browser_download_url" \
+                | grep "checksums.txt" \
+                | cut -d'"' -f4 || true)
+
+            local tmpdir
+            tmpdir=$(mktemp -d)
+            info "Downloading $release_url"
+            curl -fsSL "$release_url" -o "$tmpdir/madar.new"
+
+            if [[ -n "$checksums_url" ]]; then
+                curl -fsSL "$checksums_url" -o "$tmpdir/checksums.txt"
+                local expected_sum
+                expected_sum=$(grep "madar-${PLATFORM}-${GOARCH}" "$tmpdir/checksums.txt" | awk '{print $1}')
+                if [[ -n "$expected_sum" ]]; then
+                    local actual_sum
+                    actual_sum=$(sha256sum "$tmpdir/madar.new" | awk '{print $1}')
+                    if [[ "$expected_sum" != "$actual_sum" ]]; then
+                        rm -rf "$tmpdir"
+                        die "Checksum mismatch — aborting update (expected $expected_sum, got $actual_sum)"
+                    fi
+                    info "Checksum verified"
+                fi
+            fi
+
+            # Stop service, swap binary, restart
+            if [[ "$PLATFORM" == "linux" ]] && has_cmd systemctl; then
+                run_privileged systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+            elif [[ "$PLATFORM" == "darwin" ]]; then
+                launchctl unload "$HOME/Library/LaunchAgents/com.madar.agent.plist" 2>/dev/null || true
+            fi
+
+            chmod +x "$tmpdir/madar.new"
+            run_privileged mv "$tmpdir/madar.new" "$BIN_PATH"
+            rm -rf "$tmpdir"
+
+            if [[ "$PLATFORM" == "linux" ]] && has_cmd systemctl; then
+                run_privileged systemctl start "$SERVICE_NAME" 2>/dev/null && \
+                    success "Service restarted"
+            elif [[ "$PLATFORM" == "darwin" ]]; then
+                launchctl load "$HOME/Library/LaunchAgents/com.madar.agent.plist" 2>/dev/null || true
+                success "Service restarted"
+            fi
+
+            local new_version
+            new_version=$("$BIN_PATH" -version 2>/dev/null || echo "unknown")
+            success "Updated: $old_version → $new_version"
             exit 0
             ;;
         update-keys)

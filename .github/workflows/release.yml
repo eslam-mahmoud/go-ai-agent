@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: make test
+
+      - name: Build
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          COMMIT="$(git rev-parse --short HEAD)"
+          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          LDFLAGS="-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${DATE}"
+          GOOS=linux  GOARCH=amd64 go build -trimpath -ldflags "${LDFLAGS}" -o madar-linux-amd64  ./cmd/madar/
+          GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "${LDFLAGS}" -o madar-darwin-arm64 ./cmd/madar/
+          GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "${LDFLAGS}" -o madar-darwin-amd64 ./cmd/madar/
+          sha256sum madar-linux-amd64 madar-darwin-arm64 madar-darwin-amd64 > checksums.txt
+
+      - name: Publish release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            madar-linux-amd64 \
+            madar-darwin-arm64 \
+            madar-darwin-amd64 \
+            checksums.txt \
+            --generate-notes \
+            --title "Madar ${GITHUB_REF_NAME}"

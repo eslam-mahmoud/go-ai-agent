@@ -16,18 +16,26 @@ import (
 	githubclient "github.com/eslam-mahmoud/go-ai-agent/internal/github"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/store"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/telegram"
+	"github.com/eslam-mahmoud/go-ai-agent/internal/updater"
 )
 
 type Loop struct {
-	cfg         *config.Config
-	gh          githubclient.Client
-	claude      claude.Runner
-	telegram    telegram.Gateway
-	store       *store.Store
-	log         *slog.Logger
-	lastPruneAt time.Time
-	botUsername  string // GitHub login of the authenticated token
+	cfg                 *config.Config
+	gh                  githubclient.Client
+	claude              claude.Runner
+	telegram            telegram.Gateway
+	store               *store.Store
+	log                 *slog.Logger
+	lastPruneAt         time.Time
+	botUsername         string // GitHub login of the authenticated token
+	currentVersion      string // set via SetCurrentVersion; empty disables daily update check
+	lastUpdateCheckAt   time.Time
+	lastNotifiedVersion string
 }
+
+// SetCurrentVersion enables the daily background update check.
+// Pass the value of the Version build variable.
+func (l *Loop) SetCurrentVersion(v string) { l.currentVersion = v }
 
 func New(
 	cfg *config.Config,
@@ -92,6 +100,13 @@ func (l *Loop) tick(ctx context.Context) error {
 			l.log.Info("pruned completed tasks", "rows_deleted", n)
 		}
 		l.lastPruneAt = time.Now()
+	}
+
+	// Daily self-update check (non-blocking, skipped for dev builds).
+	if l.currentVersion != "" && l.currentVersion != "dev" &&
+		time.Since(l.lastUpdateCheckAt) > 24*time.Hour {
+		l.lastUpdateCheckAt = time.Now()
+		go l.checkForUpdate(ctx)
 	}
 
 	// Run CI and feedback checks unconditionally — they don't need the active
@@ -483,4 +498,26 @@ func formatThread(comments []*githubclient.Comment) string {
 // isAgentComment returns true if the comment was posted by Madar itself.
 func isAgentComment(body string) bool {
 	return strings.HasPrefix(body, "🤔 **Madar") || strings.HasPrefix(body, "✅ **Madar") || strings.HasPrefix(body, "❌ **Madar")
+}
+
+// checkForUpdate queries GitHub Releases for a newer version and notifies
+// via Telegram and the log if one is found. Called from a goroutine.
+func (l *Loop) checkForUpdate(ctx context.Context) {
+	rel, err := updater.Check(ctx, l.currentVersion)
+	if err != nil {
+		l.log.Debug("update check failed", "err", err)
+		return
+	}
+	if rel == nil {
+		return // already on latest
+	}
+	if rel.Version == l.lastNotifiedVersion {
+		return // already told the operator about this version
+	}
+	l.lastNotifiedVersion = rel.Version
+
+	msg := fmt.Sprintf("Madar %s is available (you have %s). Run `madar -update` to upgrade.",
+		rel.Version, l.currentVersion)
+	l.log.Warn("new Madar version available", "version", rel.Version, "current", l.currentVersion)
+	_ = l.telegram.NotifyClarification(ctx, "", msg)
 }

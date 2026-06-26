@@ -16,6 +16,7 @@ import (
 	"github.com/eslam-mahmoud/go-ai-agent/internal/orchestrator"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/store"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/telegram"
+	"github.com/eslam-mahmoud/go-ai-agent/internal/updater"
 )
 
 // Build-time variables injected via -ldflags.
@@ -31,10 +32,16 @@ func main() {
 	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	showStatus := flag.Bool("status", false, "print agent status from the database and exit")
+	doUpdate := flag.Bool("update", false, "check for and apply the latest Madar release, then exit")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Printf("madar %s (commit %s, built %s)\n", Version, Commit, BuildDate)
+		os.Exit(0)
+	}
+
+	if *doUpdate {
+		runUpdate(Version)
 		os.Exit(0)
 	}
 
@@ -79,6 +86,7 @@ func main() {
 	tg := telegram.New(cfg.Telegram.BotToken, cfg.Telegram.AllowedIDs)
 
 	loop := orchestrator.New(cfg, ghClient, runner, tg, s, log)
+	loop.SetCurrentVersion(Version)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
@@ -121,6 +129,30 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("madar stopped")
+}
+
+func runUpdate(currentVersion string) {
+	ctx := context.Background()
+	fmt.Printf("Current version: %s\n", currentVersion)
+	fmt.Print("Checking for updates... ")
+
+	rel, err := updater.Check(ctx, currentVersion)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\nUpdate check failed: %v\n", err)
+		os.Exit(1)
+	}
+	if rel == nil {
+		fmt.Printf("already up to date.\n")
+		return
+	}
+
+	fmt.Printf("found %s\n", rel.Version)
+	fmt.Printf("Downloading %s... ", rel.AssetURL)
+	if err := updater.Apply(ctx, rel); err != nil {
+		fmt.Fprintf(os.Stderr, "\nUpdate failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("done.\nUpdated to %s. Restart madar to use the new version.\n", rel.Version)
 }
 
 func printStatus(s *store.Store, cfg *config.Config) {

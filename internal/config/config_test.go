@@ -189,6 +189,20 @@ ci:
 	}
 }
 
+func TestLoad_unknownKeyReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	// Typo: "max_retires" instead of "max_retries"
+	yaml := "repos: []\nci:\n  max_retires: 5\n"
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(cfgPath, "")
+	if err == nil {
+		t.Error("expected error for unknown YAML key 'max_retires', got nil")
+	}
+}
+
 func TestLoad_missingFile(t *testing.T) {
 	_, err := Load("/no/such/file.yaml", "")
 	if err == nil {

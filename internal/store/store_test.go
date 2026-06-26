@@ -109,8 +109,24 @@ func TestMigration_setsVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion: %v", err)
 	}
-	if v != len(migrations) {
-		t.Errorf("schema version = %d, want %d (one per migration)", v, len(migrations))
+	want := len(migrations)
+	if v != want {
+		t.Errorf("schema version = %d, want %d (one per migration)", v, want)
+	}
+}
+
+func TestMigration_indexesExist(t *testing.T) {
+	s := openTestStore(t)
+	// Verify the indexes from v2 were created.
+	indexes := []string{"idx_tasks_state", "idx_tasks_ci_state", "idx_audit_created"}
+	for _, idx := range indexes {
+		var name string
+		err := s.db.QueryRow(
+			`SELECT name FROM sqlite_master WHERE type='index' AND name=?`, idx,
+		).Scan(&name)
+		if err != nil {
+			t.Errorf("index %q not found: %v", idx, err)
+		}
 	}
 }
 

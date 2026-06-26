@@ -103,6 +103,13 @@ var migrations = []struct {
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);
 	`},
+	// v2: indexes on frequently-filtered columns to avoid full table scans on
+	// every tick. Applied after v1 so the tables exist.
+	{2, `
+		CREATE INDEX IF NOT EXISTS idx_tasks_state    ON tasks(state);
+		CREATE INDEX IF NOT EXISTS idx_tasks_ci_state ON tasks(ci_state);
+		CREATE INDEX IF NOT EXISTS idx_audit_created  ON audit_log(created_at);
+	`},
 }
 
 func (s *Store) migrate() error {

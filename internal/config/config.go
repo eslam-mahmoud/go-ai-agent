@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -111,8 +112,10 @@ func Load(configPath, envPath string) (*Config, error) {
 	}
 
 	var raw rawConfig
-	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
+	dec := yaml.NewDecoder(strings.NewReader(string(data)))
+	dec.KnownFields(true)
+	if err := dec.Decode(&raw); err != nil {
+		return nil, fmt.Errorf("parse config (unknown or misspelled key?): %w", err)
 	}
 
 	applyDefaults(&raw)

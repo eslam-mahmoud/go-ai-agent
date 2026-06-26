@@ -83,6 +83,9 @@ func (l *Loop) finalizeCISuccess(ctx context.Context, owner, repo string, task *
 	if _, err := l.store.UpsertTask(task.Repo, task.IssueNumber, store.StateDone, ""); err != nil {
 		return err
 	}
+	if err := l.gh.CloseIssue(ctx, owner, repo, task.IssueNumber); err != nil {
+		l.log.Warn("close issue failed", "issue", task.IssueNumber, "err", err)
+	}
 	_ = l.store.Log(task.Repo, task.IssueNumber, "ci_passed", "")
 
 	issue, err := l.gh.GetIssue(ctx, owner, repo, task.IssueNumber)

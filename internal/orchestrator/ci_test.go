@@ -261,3 +261,4 @@ func (f *fakeGitHubCI) CreateLabel(ctx context.Context, o, r, name, color string
 func (f *fakeGitHubCI) EnsureLabels(ctx context.Context, o, r string, m map[string]string) error {
 	return f.fakeGitHub.EnsureLabels(ctx, o, r, m)
 }
+func (f *fakeGitHubCI) CloseIssue(_ context.Context, _, _ string, _ int) error { return nil }

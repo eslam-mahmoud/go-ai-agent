@@ -38,6 +38,7 @@ type Client interface {
 	EnsureLabels(ctx context.Context, owner, repo string, labels map[string]string) error
 	GetCheckSuiteStatus(ctx context.Context, owner, repo, branch string) (CheckStatus, error)
 	GetFailedStepOutput(ctx context.Context, owner, repo, branch string) (string, error)
+	CloseIssue(ctx context.Context, owner, repo string, number int) error
 }
 
 type githubClient struct {
@@ -145,6 +146,12 @@ func (c *githubClient) CreateLabel(ctx context.Context, owner, repo, name, color
 		Name:  gh.String(name),
 		Color: gh.String(color),
 	})
+	return err
+}
+
+func (c *githubClient) CloseIssue(ctx context.Context, owner, repo string, number int) error {
+	closed := "closed"
+	_, _, err := c.gh.Issues.Edit(ctx, owner, repo, number, &gh.IssueRequest{State: &closed})
 	return err
 }
 

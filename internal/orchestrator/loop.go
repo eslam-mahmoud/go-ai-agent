@@ -314,6 +314,9 @@ func (l *Loop) handleCompletion(ctx context.Context, owner, repo, fullRepo strin
 	if _, err := l.store.UpsertTask(fullRepo, issueNumber, store.StateDone, ""); err != nil {
 		return err
 	}
+	if err := l.gh.CloseIssue(ctx, owner, repo, issueNumber); err != nil {
+		l.log.Warn("close issue failed", "issue", issueNumber, "err", err)
+	}
 	_ = l.store.Log(fullRepo, issueNumber, "done", "")
 	_ = l.telegram.NotifyCompletion(ctx, issue.HTMLURL, summary)
 	return nil

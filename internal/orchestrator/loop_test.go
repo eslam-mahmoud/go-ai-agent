@@ -62,6 +62,7 @@ func (f *fakeGitHub) GetCheckSuiteStatus(_ context.Context, _, _, _ string) (git
 func (f *fakeGitHub) GetFailedStepOutput(_ context.Context, _, _, _ string) (string, error) {
 	return "", nil
 }
+func (f *fakeGitHub) CloseIssue(_ context.Context, _, _ string, _ int) error { return nil }
 
 type fakeRunner struct {
 	result *claude.Result

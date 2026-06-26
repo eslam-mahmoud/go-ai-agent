@@ -328,7 +328,7 @@ configure_credentials() {
     existing_tg_ids=$(grep "^TELEGRAM_ALLOWED_IDS=" "$ENV_PATH" 2>/dev/null | cut -d= -f2 || true)
 
     # ── GitHub token ──
-    echo "  ${BOLD}GitHub Personal Access Token${RESET}"
+    echo -e "  ${BOLD}GitHub Personal Access Token${RESET}"
     echo "  Needs 'repo' scope. Create at: https://github.com/settings/tokens/new"
     if [[ -n "$existing_token" ]]; then
         echo "  Current: ${existing_token:0:8}… (press Enter to keep)"
@@ -352,7 +352,7 @@ configure_credentials() {
     echo ""
 
     # ── Telegram ──
-    echo "  ${BOLD}Telegram Bot Token${RESET}"
+    echo -e "  ${BOLD}Telegram Bot Token${RESET}"
     echo "  Create a bot at @BotFather and paste the token here."
     if [[ -n "$existing_tg_token" ]]; then
         echo "  Current: ${existing_tg_token:0:10}… (press Enter to keep)"
@@ -363,7 +363,7 @@ configure_credentials() {
     fi
 
     echo ""
-    echo "  ${BOLD}Telegram Allowed Chat IDs${RESET}"
+    echo -e "  ${BOLD}Telegram Allowed Chat IDs${RESET}"
     echo "  Message @userinfobot on Telegram to get your chat ID."
     echo "  Comma-separated for multiple recipients."
     if [[ -n "$existing_tg_ids" ]]; then

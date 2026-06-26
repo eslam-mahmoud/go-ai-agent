@@ -9,6 +9,7 @@ Madar is a Go binary that runs on a server (e.g. an EC2 instance) and acts as an
 ## Table of Contents
 
 - [How It Works](#how-it-works)
+- [CI/CD Feedback Loop](#cicd-feedback-loop)
 - [Architecture](#architecture)
 - [Design Decisions](#design-decisions)
 - [Installation](#installation)
@@ -52,6 +53,49 @@ GitHub Issue (ready)
            ▼
          done
 ```
+
+---
+
+## CI/CD Feedback Loop
+
+When `ci.enabled: true`, Madar goes beyond just running Claude — it watches the GitHub Actions check suite after Claude opens a PR and automatically re-invokes Claude with the failure output if CI is red. This loops until green or a retry cap is hit, then escalates to you.
+
+```
+Claude commits → pushes branch madar/issue-N → opens PR
+                                                    │
+                                     Madar polls check suite (every 30s)
+                                                    │
+                          ┌─────────────────────────┼──────────────────────┐
+                          │ pending                  │ success              │ failure
+                          │                          │                      │
+                        skip                   finalize                increment retries
+                                              label: done            resume Claude session
+                                              close issue            with failure output
+                                              Telegram ✅                    │
+                                                               ci_state = waiting
+                                                               (loop repeats)
+                                                                      │
+                                                           retries > max_retries
+                                                                      │
+                                                        escalate → awaiting-feedback
+                                                          post question + Telegram 🤔
+```
+
+**What Madar stores per task:** `pr_number`, `ci_state` (`waiting` / `passed` / `failed` / `gave_up`), `ci_retries` — all in SQLite so the state survives restarts.
+
+**Why this is irreplaceable:** The CLI is a one-shot tool. Something has to wait for an async CI event, look up which Claude session corresponds to the failed PR, and resume it with the test output. That requires persistent state no bash script can provide across invocations.
+
+### Enabling CI
+
+```yaml
+ci:
+  enabled: true
+  max_retries: 3       # re-invoke Claude up to N times on failure
+  poll_interval: 30s   # how often to check check suite status
+  wait_timeout: 20m    # give up waiting for CI after this long
+```
+
+Claude is instructed to create a branch named exactly `madar/issue-<N>` and include `PR: #<number>` in its response — Madar parses this to start watching the right branch.
 
 ---
 
@@ -270,6 +314,13 @@ claude:
   context_reset_threshold: 0.6 # fraction of model context window at which to rotate session
   skip_permissions: true       # --dangerously-skip-permissions (required for headless operation)
 
+# CI/CD feedback loop — watch check suites and auto-retry on failure
+ci:
+  enabled: false       # set true to enable
+  max_retries: 3       # re-invoke Claude up to N times on CI failure
+  poll_interval: 30s   # how often to poll check suite status
+  wait_timeout: 20m    # give up waiting for CI after this wall time
+
 # Local paths
 db_path: /opt/madar/madar.db
 workspace_dir: /opt/madar/workspaces
@@ -374,7 +425,8 @@ sudo journalctl -fu madar   # follow logs
 │   │   └── store_test.go
 │   ├── github/
 │   │   ├── client.go            # GitHub Issues API client
-│   │   └── client_test.go
+│   │   ├── client_test.go
+│   │   └── checks.go            # GitHub Actions check suite polling
 │   ├── claude/
 │   │   ├── runner.go            # claude CLI wrapper + stream-json parser
 │   │   └── runner_test.go
@@ -383,7 +435,11 @@ sudo journalctl -fu madar   # follow logs
 │   │   └── gateway_test.go
 │   └── orchestrator/
 │       ├── loop.go              # Main poll loop + task state machine
-│       └── loop_test.go
+│       ├── loop_test.go
+│       ├── ci.go                # CI/CD feedback loop state machine
+│       ├── ci_test.go
+│       ├── workspace.go         # Auto-clone workspace repos on startup
+│       └── workspace_test.go
 ├── config.yaml                  # Agent behaviour (safe to commit)
 ├── .env                         # Secrets — never commit
 └── workspaces/                  # Cloned repos — never commit

@@ -65,8 +65,14 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-func (s *Store) migrate() error {
-	_, err := s.db.Exec(`
+// migrations is the ordered list of schema migrations. Each entry is applied
+// exactly once and permanently recorded in schema_migrations. Add new entries
+// at the end — never edit or reorder existing ones.
+var migrations = []struct {
+	version int
+	sql     string
+}{
+	{1, `
 		CREATE TABLE IF NOT EXISTS tasks (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			repo TEXT NOT NULL,
@@ -82,7 +88,6 @@ func (s *Store) migrate() error {
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			UNIQUE(repo, issue_number)
 		);
-
 		CREATE TABLE IF NOT EXISTS audit_log (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			repo TEXT NOT NULL,
@@ -91,8 +96,49 @@ func (s *Store) migrate() error {
 			details TEXT NOT NULL DEFAULT '',
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);
-	`)
-	return err
+	`},
+}
+
+func (s *Store) migrate() error {
+	// Bootstrap the migrations table itself.
+	if _, err := s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version INTEGER PRIMARY KEY,
+			applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)
+	`); err != nil {
+		return fmt.Errorf("create schema_migrations: %w", err)
+	}
+
+	// Find the highest applied version.
+	var current int
+	row := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_migrations`)
+	if err := row.Scan(&current); err != nil {
+		return fmt.Errorf("read schema version: %w", err)
+	}
+
+	// Apply any pending migrations in order.
+	for _, m := range migrations {
+		if m.version <= current {
+			continue
+		}
+		if _, err := s.db.Exec(m.sql); err != nil {
+			return fmt.Errorf("migration v%d: %w", m.version, err)
+		}
+		if _, err := s.db.Exec(
+			`INSERT INTO schema_migrations (version) VALUES (?)`, m.version,
+		); err != nil {
+			return fmt.Errorf("record migration v%d: %w", m.version, err)
+		}
+	}
+	return nil
+}
+
+// SchemaVersion returns the currently applied schema version.
+func (s *Store) SchemaVersion() (int, error) {
+	var v int
+	err := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&v)
+	return v, err
 }
 
 func (s *Store) UpsertTask(repo string, issueNumber int, state TaskState, sessionID string) (*Task, error) {

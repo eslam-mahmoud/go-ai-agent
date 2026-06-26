@@ -16,6 +16,39 @@ func openTestStore(t *testing.T) *Store {
 	return s
 }
 
+func TestMigration_setsVersion(t *testing.T) {
+	s := openTestStore(t)
+	v, err := s.SchemaVersion()
+	if err != nil {
+		t.Fatalf("SchemaVersion: %v", err)
+	}
+	if v != len(migrations) {
+		t.Errorf("schema version = %d, want %d (one per migration)", v, len(migrations))
+	}
+}
+
+func TestMigration_idempotent(t *testing.T) {
+	// Opening the same DB a second time should not error.
+	dir := t.TempDir()
+	path := dir + "/test.db"
+	s1, err := Open(path)
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	s1.Close()
+
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatalf("second Open (idempotent): %v", err)
+	}
+	defer s2.Close()
+
+	v, _ := s2.SchemaVersion()
+	if v != len(migrations) {
+		t.Errorf("schema version after reopen = %d, want %d", v, len(migrations))
+	}
+}
+
 func TestUpsertAndGet(t *testing.T) {
 	s := openTestStore(t)
 

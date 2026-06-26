@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -53,6 +52,10 @@ func main() {
 	defer stop()
 
 	log.Info("madar ready", "repos", cfg.Repos, "db", cfg.DBPath)
+	if err := orchestrator.EnsureWorkspaces(ctx, cfg, log); err != nil {
+		log.Error("workspace setup failed", "err", err)
+		os.Exit(1)
+	}
 	if err := loop.Run(ctx); err != nil && err != context.Canceled {
 		log.Error("loop exited", "err", err)
 		os.Exit(1)
@@ -75,6 +78,3 @@ func newLogger(level string) *slog.Logger {
 	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
 }
 
-func init() {
-	_ = fmt.Sprintf // keep fmt imported
-}

@@ -60,6 +60,20 @@ detect_platform() {
         aarch64|arm64) GOARCH="arm64" ;;
         *)       die "Unsupported arch: $ARCH" ;;
     esac
+
+    # Detect Linux package manager family.
+    PKG_MANAGER=""
+    if [[ "$PLATFORM" == "linux" ]]; then
+        if has_cmd apt-get; then
+            PKG_MANAGER="apt"
+        elif has_cmd dnf; then
+            PKG_MANAGER="dnf"
+        elif has_cmd yum; then
+            PKG_MANAGER="yum"
+        else
+            PKG_MANAGER="unknown"
+        fi
+    fi
 }
 
 # ── command helpers ───────────────────────────────────────────────────────────
@@ -110,6 +124,65 @@ validate_github_token() {
     [[ "$status" == "200" ]]
 }
 
+# ── package manager helpers ───────────────────────────────────────────────────
+pkg_install() {
+    case "$PKG_MANAGER" in
+        apt) run_privileged apt-get install -y "$@" ;;
+        dnf) run_privileged dnf install -y "$@" ;;
+        yum) run_privileged yum install -y "$@" ;;
+        *)   die "No supported package manager found (apt/dnf/yum). Install manually: $*" ;;
+    esac
+}
+
+install_nodejs_linux() {
+    case "$PKG_MANAGER" in
+        apt)
+            curl -fsSL https://deb.nodesource.com/setup_lts.x | run_privileged bash -
+            run_privileged apt-get install -y nodejs
+            ;;
+        dnf|yum)
+            curl -fsSL https://rpm.nodesource.com/setup_lts.x | run_privileged bash -
+            pkg_install nodejs
+            ;;
+        *)
+            # Fallback: install via nvm (works on any Linux without package manager)
+            warn "Unknown package manager — installing Node.js via nvm"
+            export NVM_DIR="$HOME/.nvm"
+            curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+            # shellcheck source=/dev/null
+            source "$NVM_DIR/nvm.sh"
+            nvm install --lts
+            ;;
+    esac
+}
+
+install_gh_linux() {
+    case "$PKG_MANAGER" in
+        apt)
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+                | run_privileged dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+                | run_privileged tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+            run_privileged apt-get update && run_privileged apt-get install -y gh
+            ;;
+        dnf|yum)
+            run_privileged "$PKG_MANAGER" config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo 2>/dev/null || \
+                run_privileged "$PKG_MANAGER" install -y 'dnf-command(config-manager)' 2>/dev/null && \
+                run_privileged "$PKG_MANAGER" config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
+            pkg_install gh
+            ;;
+        *)
+            # Fallback: download gh binary directly
+            warn "Unknown package manager — installing gh via binary download"
+            local gh_ver
+            gh_ver=$(curl -s https://api.github.com/repos/cli/cli/releases/latest \
+                | grep '"tag_name"' | cut -d'"' -f4 | sed 's/^v//')
+            curl -fsSL "https://github.com/cli/cli/releases/download/v${gh_ver}/gh_${gh_ver}_linux_amd64.tar.gz" \
+                | run_privileged tar -xz -C /usr/local --strip-components=1
+            ;;
+    esac
+}
+
 # ── step: deps ────────────────────────────────────────────────────────────────
 install_deps() {
     if [[ "$(step_status deps)" == "done" ]]; then
@@ -118,12 +191,11 @@ install_deps() {
     fi
     info "Installing dependencies…"
 
-    # Node.js (for claude CLI)
+    # Node.js (required for Claude Code CLI)
     if ! has_cmd node; then
         info "Installing Node.js…"
         if [[ "$PLATFORM" == "linux" ]]; then
-            curl -fsSL https://deb.nodesource.com/setup_lts.x | run_privileged bash -
-            run_privileged apt-get install -y nodejs
+            install_nodejs_linux
         elif [[ "$PLATFORM" == "darwin" ]]; then
             has_cmd brew || die "Homebrew is required on macOS. Install from https://brew.sh"
             brew install node
@@ -136,7 +208,7 @@ install_deps() {
     if ! has_cmd git; then
         info "Installing git…"
         if [[ "$PLATFORM" == "linux" ]]; then
-            run_privileged apt-get install -y git
+            pkg_install git
         elif [[ "$PLATFORM" == "darwin" ]]; then
             brew install git
         fi
@@ -144,15 +216,11 @@ install_deps() {
         success "git already installed"
     fi
 
-    # gh CLI (optional but useful)
+    # gh CLI (used to clone private repos and post comments)
     if ! has_cmd gh; then
         info "Installing gh CLI…"
         if [[ "$PLATFORM" == "linux" ]]; then
-            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-                | run_privileged dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-                | run_privileged tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-            run_privileged apt-get update && run_privileged apt-get install -y gh
+            install_gh_linux
         elif [[ "$PLATFORM" == "darwin" ]]; then
             brew install gh
         fi

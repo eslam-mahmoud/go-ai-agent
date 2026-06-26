@@ -18,6 +18,7 @@ type Config struct {
 	ContextDir   string
 	Claude       ClaudeConfig
 	CI           CIConfig
+	Cleanup      CleanupConfig
 	GitHub       GitHubConfig
 	Telegram     TelegramConfig
 	DBPath       string
@@ -29,6 +30,12 @@ type CIConfig struct {
 	MaxRetries   int
 	PollInterval time.Duration
 	WaitTimeout  time.Duration
+}
+
+type CleanupConfig struct {
+	Interval          time.Duration // how often to run pruning (default 24h)
+	AuditLogRetention time.Duration // delete audit entries older than this (default 30d)
+	TaskRetention     time.Duration // delete done tasks older than this (default 90d)
 }
 
 type ConcurrencyConfig struct {
@@ -95,6 +102,11 @@ type rawConfig struct {
 		PollIntervalStr  string `yaml:"poll_interval"`
 		WaitTimeoutStr   string `yaml:"wait_timeout"`
 	} `yaml:"ci"`
+	Cleanup struct {
+		IntervalStr          string `yaml:"interval"`
+		AuditLogRetentionStr string `yaml:"audit_log_retention"`
+		TaskRetentionStr     string `yaml:"task_retention"`
+	} `yaml:"cleanup"`
 	DBPath       string `yaml:"db_path"`
 	WorkspaceDir string `yaml:"workspace_dir"`
 }
@@ -131,6 +143,18 @@ func Load(configPath, envPath string) (*Config, error) {
 	ciWaitTimeout, err := time.ParseDuration(raw.CI.WaitTimeoutStr)
 	if err != nil {
 		return nil, fmt.Errorf("parse ci.wait_timeout %q: %w", raw.CI.WaitTimeoutStr, err)
+	}
+	cleanupInterval, err := time.ParseDuration(raw.Cleanup.IntervalStr)
+	if err != nil {
+		return nil, fmt.Errorf("parse cleanup.interval %q: %w", raw.Cleanup.IntervalStr, err)
+	}
+	auditRetention, err := time.ParseDuration(raw.Cleanup.AuditLogRetentionStr)
+	if err != nil {
+		return nil, fmt.Errorf("parse cleanup.audit_log_retention %q: %w", raw.Cleanup.AuditLogRetentionStr, err)
+	}
+	taskRetention, err := time.ParseDuration(raw.Cleanup.TaskRetentionStr)
+	if err != nil {
+		return nil, fmt.Errorf("parse cleanup.task_retention %q: %w", raw.Cleanup.TaskRetentionStr, err)
 	}
 
 	telegramIDs := splitCSV(os.Getenv("TELEGRAM_ALLOWED_IDS"))
@@ -172,6 +196,11 @@ func Load(configPath, envPath string) (*Config, error) {
 			MaxRetries:   raw.CI.MaxRetries,
 			PollInterval: ciPollInterval,
 			WaitTimeout:  ciWaitTimeout,
+		},
+		Cleanup: CleanupConfig{
+			Interval:          cleanupInterval,
+			AuditLogRetention: auditRetention,
+			TaskRetention:     taskRetention,
 		},
 		DBPath:       raw.DBPath,
 		WorkspaceDir: raw.WorkspaceDir,
@@ -228,6 +257,15 @@ func applyDefaults(raw *rawConfig) {
 	}
 	if raw.CI.WaitTimeoutStr == "" {
 		raw.CI.WaitTimeoutStr = "20m"
+	}
+	if raw.Cleanup.IntervalStr == "" {
+		raw.Cleanup.IntervalStr = "24h"
+	}
+	if raw.Cleanup.AuditLogRetentionStr == "" {
+		raw.Cleanup.AuditLogRetentionStr = "720h" // 30 days
+	}
+	if raw.Cleanup.TaskRetentionStr == "" {
+		raw.Cleanup.TaskRetentionStr = "2160h" // 90 days
 	}
 	if raw.DBPath == "" {
 		raw.DBPath = "/opt/madar/madar.db"

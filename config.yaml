@@ -32,5 +32,10 @@ ci:
   poll_interval: 30s   # how often to check check suite status
   wait_timeout: 20m    # give up waiting for CI after this long
 
+cleanup:
+  interval: 24h              # how often to run pruning
+  audit_log_retention: 720h  # delete audit entries older than 30 days
+  task_retention: 2160h      # delete done tasks older than 90 days
+
 db_path: ./madar.db
 workspace_dir: ./workspaces

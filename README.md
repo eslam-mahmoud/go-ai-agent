@@ -12,7 +12,7 @@ Madar is a Go binary that runs on a server (e.g. an EC2 instance) and acts as an
 - [CI/CD Feedback Loop](#cicd-feedback-loop)
 - [Architecture](#architecture)
 - [Design Decisions](#design-decisions)
-- [Installation](#installation)
+- [Installation](#installation) ← one-command curl installer
 - [Environment Variables](#environment-variables)
 - [Configuration Reference](#configuration-reference)
 - [GitHub Issue Workflow](#github-issue-workflow)
@@ -202,6 +202,38 @@ Durable context lives in `CLAUDE.md` (committed, always loaded) and `.claude-con
 ---
 
 ## Installation
+
+### One-command install (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eslam-mahmoud/go-ai-agent/main/install.sh | bash
+```
+
+The installer:
+1. Installs Node.js, git, and the `gh` CLI if missing
+2. Installs and authenticates the Claude Code CLI via OAuth
+3. Downloads the pre-built `madar` binary (or builds from source)
+4. **Interactively prompts** for your GitHub token, Telegram bot token, and allowed chat IDs — validating each before saving
+5. Prompts for which repos to watch
+6. Installs and starts a systemd service (Linux) or launchd agent (macOS)
+
+The installer is **idempotent** — re-running it resumes from where it left off using a checkpoint file at `/opt/madar/.install-state`.
+
+**Update credentials later:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eslam-mahmoud/go-ai-agent/main/install.sh | bash -s -- --update-keys
+```
+
+**Remove the service** (keeps files):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eslam-mahmoud/go-ai-agent/main/install.sh | bash -s -- --uninstall
+```
+
+---
+
+### Manual install (from source)
 
 ### Prerequisites
 

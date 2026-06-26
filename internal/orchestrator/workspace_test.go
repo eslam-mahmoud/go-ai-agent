@@ -11,6 +11,47 @@ import (
 	"github.com/eslam-mahmoud/go-ai-agent/internal/config"
 )
 
+func TestGitEnvWithToken_injectsRewrite(t *testing.T) {
+	env := gitEnvWithToken("ghp_secret")
+	hasCount, hasKey, hasVal := false, false, false
+	for _, e := range env {
+		switch e {
+		case "GIT_CONFIG_COUNT=1":
+			hasCount = true
+		case "GIT_CONFIG_VALUE_0=https://github.com/":
+			hasVal = true
+		}
+		if len(e) > 16 && e[:16] == "GIT_CONFIG_KEY_0" {
+			if !containsStr(e, "ghp_secret") {
+				t.Errorf("GIT_CONFIG_KEY_0 should contain token, got: %s", e)
+			}
+			if !containsStr(e, "x-access-token") {
+				t.Errorf("GIT_CONFIG_KEY_0 should use x-access-token, got: %s", e)
+			}
+			hasKey = true
+		}
+	}
+	if !hasCount {
+		t.Error("env missing GIT_CONFIG_COUNT=1")
+	}
+	if !hasKey {
+		t.Error("env missing GIT_CONFIG_KEY_0")
+	}
+	if !hasVal {
+		t.Error("env missing GIT_CONFIG_VALUE_0")
+	}
+}
+
+func TestGitEnvWithToken_emptyToken(t *testing.T) {
+	// Empty token should not inject config vars — plain os.Environ()
+	env := gitEnvWithToken("")
+	for _, e := range env {
+		if containsStr(e, "GIT_CONFIG_COUNT") {
+			t.Errorf("empty token should not inject GIT_CONFIG vars, found: %s", e)
+		}
+	}
+}
+
 func TestEnsureWorkspaces_alreadyExists(t *testing.T) {
 	dir := t.TempDir()
 	// Pre-create the workspace directory.

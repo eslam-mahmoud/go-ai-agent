@@ -30,6 +30,7 @@ func main() {
 	envPath := flag.String("env", ".env", "path to .env file")
 	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	showStatus := flag.Bool("status", false, "print agent status from the database and exit")
 	flag.Parse()
 
 	if *showVersion {
@@ -67,6 +68,11 @@ func main() {
 		os.Exit(1)
 	}
 	defer s.Close()
+
+	if *showStatus {
+		printStatus(s, cfg)
+		os.Exit(0)
+	}
 
 	ghClient := githubclient.New(cfg.GitHub.Token)
 	runner := claude.New(cfg.Claude.Bin)
@@ -115,6 +121,32 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("madar stopped")
+}
+
+func printStatus(s *store.Store, cfg *config.Config) {
+	v, _ := s.SchemaVersion()
+	active, _ := s.CountActive()
+	inProgress, _ := s.ListByState(store.StateInProgress)
+	waiting, _ := s.ListByState(store.StateAwaitingFeedback)
+	ciWaiting, _ := s.ListByCIState(store.CIStateWaiting)
+
+	fmt.Printf("madar status\n")
+	fmt.Printf("  schema version : %d\n", v)
+	fmt.Printf("  db             : %s\n", cfg.DBPath)
+	fmt.Printf("  repos          : %v\n", cfg.Repos)
+	fmt.Printf("  active (claude): %d\n", active)
+	fmt.Printf("  in-progress    : %d\n", len(inProgress))
+	for _, t := range inProgress {
+		fmt.Printf("    #%d %s (session %s)\n", t.IssueNumber, t.Repo, t.SessionID)
+	}
+	fmt.Printf("  awaiting-feedback: %d\n", len(waiting))
+	for _, t := range waiting {
+		fmt.Printf("    #%d %s\n", t.IssueNumber, t.Repo)
+	}
+	fmt.Printf("  ci-watching    : %d\n", len(ciWaiting))
+	for _, t := range ciWaiting {
+		fmt.Printf("    #%d %s (pr=%d)\n", t.IssueNumber, t.Repo, t.PRNumber)
+	}
 }
 
 func newLogger(level string) *slog.Logger {

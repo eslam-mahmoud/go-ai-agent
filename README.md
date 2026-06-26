@@ -447,4 +447,36 @@ sudo journalctl -fu madar   # follow logs
 └── workspaces/                  # Cloned repos — never commit
     └── owner/
         └── repo/
+
+---
+
+## Troubleshooting
+
+### `claude binary not found`
+Install Claude Code: `npm install -g @anthropic-ai/claude-code`, then `claude login`. If installed to a non-standard path, set `claude.bin:` in `config.yaml`.
+
+### `GITHUB_TOKEN is required`
+Add `GITHUB_TOKEN=ghp_...` to your `.env` file. The token needs `repo` scope.
+
+### Issues not being picked up
+Check that the `ready` label name in `config.yaml` exactly matches what's on the GitHub repo (case-sensitive). Run `madar -status` to see what the agent is currently watching.
+
+### Task stuck `in-progress`
+A crash mid-run can leave an issue labelled `in-progress` in SQLite with no active process. Fix it:
+```bash
+sqlite3 ./madar.db "UPDATE tasks SET state='awaiting-feedback' WHERE repo='owner/repo' AND issue_number=42;"
+```
+Then manually change the GitHub label from `in-progress` to `awaiting-feedback` and post a comment on the issue.
+
+### Workspace clone failing (private repo)
+Ensure `GITHUB_TOKEN` has `repo` scope. Madar uses authenticated HTTPS (`x-access-token` via environment variables — the token is never written to `.git/config`).
+
+### Database locked errors
+Only one `madar` process should run at a time. Check for zombie processes: `pgrep -f madar`. WAL mode is enabled by default so brief concurrent reads are safe, but two writers will conflict.
+
+### Check agent status
+```bash
+./madar -config config.yaml -status
+```
+Prints schema version, active tasks, awaiting-feedback tasks, and CI-watching tasks.
 ```

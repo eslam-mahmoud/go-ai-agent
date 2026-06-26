@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -16,11 +17,24 @@ import (
 	"github.com/eslam-mahmoud/go-ai-agent/internal/telegram"
 )
 
+// Build-time variables injected via -ldflags.
+var (
+	Version   = "dev"
+	BuildDate = "unknown"
+	Commit    = "unknown"
+)
+
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to config.yaml")
 	envPath := flag.String("env", ".env", "path to .env file")
 	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("madar %s (commit %s, built %s)\n", Version, Commit, BuildDate)
+		os.Exit(0)
+	}
 
 	log := newLogger(*logLevel)
 
@@ -51,7 +65,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	log.Info("madar ready", "repos", cfg.Repos, "db", cfg.DBPath)
+	log.Info("madar ready", "version", Version, "repos", cfg.Repos, "db", cfg.DBPath)
 	if err := orchestrator.EnsureWorkspaces(ctx, cfg, log); err != nil {
 		log.Error("workspace setup failed", "err", err)
 		os.Exit(1)
@@ -77,4 +91,3 @@ func newLogger(level string) *slog.Logger {
 	}
 	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
 }
-

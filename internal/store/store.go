@@ -53,6 +53,12 @@ func Open(path string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1) // SQLite: single writer
 
+	// WAL mode: readers never block writers and vice versa.
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("enable WAL: %w", err)
+	}
+
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
 		db.Close()
@@ -280,6 +286,17 @@ func (s *Store) Log(repo string, issueNumber int, event, details string) error {
 		INSERT INTO audit_log (repo, issue_number, event, details) VALUES (?, ?, ?, ?)
 	`, repo, issueNumber, event, details)
 	return err
+}
+
+// PruneAuditLog deletes audit log entries older than the given duration.
+// Returns the number of rows deleted.
+func (s *Store) PruneAuditLog(olderThan time.Duration) (int64, error) {
+	threshold := time.Now().UTC().Add(-olderThan)
+	res, err := s.db.Exec(`DELETE FROM audit_log WHERE created_at < ?`, threshold)
+	if err != nil {
+		return 0, fmt.Errorf("prune audit_log: %w", err)
+	}
+	return res.RowsAffected()
 }
 
 func (s *Store) GetAuditLog(repo string, issueNumber int) ([]AuditEntry, error) {

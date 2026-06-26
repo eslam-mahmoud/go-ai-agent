@@ -16,6 +16,57 @@ func openTestStore(t *testing.T) *Store {
 	return s
 }
 
+func TestPruneAuditLog(t *testing.T) {
+	s := openTestStore(t)
+	_, _ = s.UpsertTask("r", 1, StateInProgress, "s")
+
+	// Write two entries — we'll prune entries older than 1h.
+	if err := s.Log("r", 1, "old_event", "details"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Log("r", 1, "new_event", "details"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Prune with a very short retention — both entries are older than 0ns so
+	// both should be deleted.
+	n, err := s.PruneAuditLog(0)
+	if err != nil {
+		t.Fatalf("PruneAuditLog: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("deleted %d rows, want 2", n)
+	}
+
+	// Verify they're gone.
+	entries, _ := s.GetAuditLog("r", 1)
+	if len(entries) != 0 {
+		t.Errorf("expected 0 entries after prune, got %d", len(entries))
+	}
+}
+
+func TestPruneAuditLog_keepsRecent(t *testing.T) {
+	s := openTestStore(t)
+	_, _ = s.UpsertTask("r", 2, StateInProgress, "s")
+	if err := s.Log("r", 2, "event", "details"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Prune with 30-day retention — recent entries should survive.
+	n, err := s.PruneAuditLog(30 * 24 * time.Hour)
+	if err != nil {
+		t.Fatalf("PruneAuditLog: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("deleted %d rows, want 0 (entries are recent)", n)
+	}
+
+	entries, _ := s.GetAuditLog("r", 2)
+	if len(entries) != 1 {
+		t.Errorf("expected 1 entry after prune of recent data, got %d", len(entries))
+	}
+}
+
 func TestMigration_setsVersion(t *testing.T) {
 	s := openTestStore(t)
 	v, err := s.SchemaVersion()

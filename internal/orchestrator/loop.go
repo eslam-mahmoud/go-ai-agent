@@ -19,12 +19,13 @@ import (
 )
 
 type Loop struct {
-	cfg      *config.Config
-	gh       githubclient.Client
-	claude   claude.Runner
-	telegram telegram.Gateway
-	store    *store.Store
-	log      *slog.Logger
+	cfg         *config.Config
+	gh          githubclient.Client
+	claude      claude.Runner
+	telegram    telegram.Gateway
+	store       *store.Store
+	log         *slog.Logger
+	lastPruneAt time.Time
 }
 
 func New(
@@ -68,6 +69,16 @@ func (l *Loop) Run(ctx context.Context) error {
 }
 
 func (l *Loop) tick(ctx context.Context) error {
+	// Prune old audit log entries once per day.
+	if time.Since(l.lastPruneAt) > 24*time.Hour {
+		if n, err := l.store.PruneAuditLog(30 * 24 * time.Hour); err != nil {
+			l.log.Warn("audit log prune failed", "err", err)
+		} else if n > 0 {
+			l.log.Info("pruned audit log", "rows_deleted", n)
+		}
+		l.lastPruneAt = time.Now()
+	}
+
 	// Run CI and feedback checks unconditionally — they don't need the active
 	// count and should not be skipped by a transient SQLite error.
 

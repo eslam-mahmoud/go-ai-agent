@@ -239,7 +239,7 @@ install_claude() {
         return
     fi
     info "Installing Claude Code CLI…"
-    npm install -g @anthropic-ai/claude-code
+    run_privileged npm install -g @anthropic-ai/claude-code
     step_done claude_install
     success "Claude Code CLI installed"
 }

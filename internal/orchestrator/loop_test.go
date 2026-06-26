@@ -495,6 +495,43 @@ func TestIsAgentComment(t *testing.T) {
 	}
 }
 
+func TestFormatHumanThread_filtersBotComments(t *testing.T) {
+	s := testStore(t)
+	loop := testLoop(t, &fakeGitHub{}, &fakeRunner{result: nil}, &fakeTelegram{}, s)
+	loop.botUsername = "madar-bot"
+
+	comments := []*githubclient.Comment{
+		{Author: "human", Body: "please add rate limiting", CreatedAt: time.Now()},
+		{Author: "madar-bot", Body: "🤔 **Madar needs your input", CreatedAt: time.Now()},
+		{Author: "human", Body: "use per-IP 5/min", CreatedAt: time.Now()},
+		{Author: "madar-bot", Body: "✅ **Madar completed", CreatedAt: time.Now()},
+	}
+	result := loop.formatHumanThread(comments)
+
+	if !containsStr(result, "please add rate limiting") {
+		t.Error("thread missing first human comment")
+	}
+	if !containsStr(result, "use per-IP 5/min") {
+		t.Error("thread missing second human comment")
+	}
+	if containsStr(result, "Madar needs") || containsStr(result, "Madar completed") {
+		t.Error("thread should not contain bot comments")
+	}
+}
+
+func TestFormatHumanThread_emptyWhenAllBot(t *testing.T) {
+	s := testStore(t)
+	loop := testLoop(t, &fakeGitHub{}, &fakeRunner{result: nil}, &fakeTelegram{}, s)
+	loop.botUsername = "madar-bot"
+
+	comments := []*githubclient.Comment{
+		{Author: "madar-bot", Body: "✅ **Madar completed this task:", CreatedAt: time.Now()},
+	}
+	if result := loop.formatHumanThread(comments); result != "" {
+		t.Errorf("expected empty thread when all comments are from bot, got: %q", result)
+	}
+}
+
 func TestFormatThread(t *testing.T) {
 	comments := []*githubclient.Comment{
 		{Author: "alice", Body: "first comment", CreatedAt: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)},

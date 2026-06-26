@@ -241,9 +241,9 @@ func (l *Loop) pickAndRun(ctx context.Context) error {
 		// Pull latest changes so Claude works against current main.
 		l.pullWorkspace(ctx, owner, repo)
 
-		// Build first-run prompt from issue + thread.
+		// Build first-run prompt from issue + thread (human comments only).
 		comments, _ := l.gh.GetComments(ctx, owner, repo, issue.Number, nil)
-		threadStr := formatThread(comments)
+		threadStr := l.formatHumanThread(comments)
 		prompt := claude.BuildFirstRunPrompt(issue.Title, issue.Body, threadStr, issue.Number)
 
 		return l.runClaude(ctx, owner, repo, issue.Number, issue, sessionID, prompt, false)
@@ -419,6 +419,28 @@ func (l *Loop) getIssueLabels(ctx context.Context, owner, repo string, issueNumb
 	return issue.Labels, nil
 }
 
+// formatHumanThread formats only human comments for inclusion in Claude's prompt.
+// Madar's own comments (clarification questions, completion summaries) are excluded
+// to avoid wasting context tokens and confusing Claude with its own prior output.
+func (l *Loop) formatHumanThread(comments []*githubclient.Comment) string {
+	var sb strings.Builder
+	for _, c := range comments {
+		if c.Author == "" {
+			continue
+		}
+		if l.botUsername != "" && c.Author == l.botUsername {
+			continue
+		}
+		if isAgentComment(c.Body) {
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("@%s (%s):\n%s\n\n",
+			c.Author, c.CreatedAt.Format(time.RFC3339), c.Body))
+	}
+	return sb.String()
+}
+
+// formatThread is kept for tests that don't need bot filtering.
 func formatThread(comments []*githubclient.Comment) string {
 	if len(comments) == 0 {
 		return ""

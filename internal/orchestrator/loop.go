@@ -228,7 +228,10 @@ func (l *Loop) runClaude(ctx context.Context, owner, repo string, issueNumber in
 		l.log.Error("claude run failed", "err", err)
 		_ = l.store.Log(fullRepo, issueNumber, "error", err.Error())
 		_ = l.telegram.NotifyError(ctx, issue.HTMLURL, err)
-		return err
+		// Transition to awaiting-feedback so the task doesn't stay in-progress
+		// forever and block the concurrency guard from picking up new work.
+		return l.handleClarification(ctx, owner, repo, fullRepo, issueNumber, issue,
+			fmt.Sprintf("Claude process failed: %v\n\nPlease advise how to proceed.", err))
 	}
 
 	// Capture session ID from stream if available (first run).
@@ -245,7 +248,9 @@ func (l *Loop) runClaude(ctx context.Context, owner, repo string, issueNumber in
 		errMsg := fmt.Errorf("claude reported an error: %s", result.Output)
 		_ = l.store.Log(fullRepo, issueNumber, "error", result.Output)
 		_ = l.telegram.NotifyError(ctx, issue.HTMLURL, errMsg)
-		return errMsg
+		// Same: don't leave the task in-progress — ask the human.
+		return l.handleClarification(ctx, owner, repo, fullRepo, issueNumber, issue,
+			fmt.Sprintf("Claude reported an error:\n\n%s\n\nPlease advise how to proceed.", result.Output))
 	}
 
 	return l.handleCompletion(ctx, owner, repo, fullRepo, issueNumber, issue, result.Output)

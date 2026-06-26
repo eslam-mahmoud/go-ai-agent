@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -223,6 +224,56 @@ func TestTick_handlesClarification(t *testing.T) {
 	}
 	if !containsStr(gh.postedComment, "Should I use A or B?") {
 		t.Errorf("comment should contain question, got: %q", gh.postedComment)
+	}
+}
+
+func TestTick_claudeRunError_transitionsToAwaitingFeedback(t *testing.T) {
+	gh := &fakeGitHub{
+		issues: []*githubclient.Issue{
+			{Number: 7, Title: "Task", HTMLURL: "url", Labels: []string{"ready"}},
+		},
+	}
+	runner := &fakeRunner{err: fmt.Errorf("timeout")}
+	tg := &fakeTelegram{}
+	s := testStore(t)
+
+	loop := testLoop(t, gh, runner, tg, s)
+	_ = loop.tick(context.Background()) // error is expected; don't fatal
+
+	task, _ := s.GetTask("owner/repo", 7)
+	if task == nil {
+		t.Fatal("task not created")
+	}
+	if task.State != store.StateAwaitingFeedback {
+		t.Errorf("task state = %q after claude error, want awaiting-feedback", task.State)
+	}
+	if !tg.errorCalled {
+		t.Error("Telegram error notification should have been sent")
+	}
+	if !tg.clarificationCalled {
+		t.Error("clarification should have been posted so human can intervene")
+	}
+}
+
+func TestTick_claudeResultError_transitionsToAwaitingFeedback(t *testing.T) {
+	gh := &fakeGitHub{
+		issues: []*githubclient.Issue{
+			{Number: 8, Title: "Task", HTMLURL: "url", Labels: []string{"ready"}},
+		},
+	}
+	runner := &fakeRunner{result: &claude.Result{IsError: true, Output: "something went wrong"}}
+	tg := &fakeTelegram{}
+	s := testStore(t)
+
+	loop := testLoop(t, gh, runner, tg, s)
+	_ = loop.tick(context.Background())
+
+	task, _ := s.GetTask("owner/repo", 8)
+	if task == nil {
+		t.Fatal("task not created")
+	}
+	if task.State != store.StateAwaitingFeedback {
+		t.Errorf("task state = %q after result error, want awaiting-feedback", task.State)
 	}
 }
 

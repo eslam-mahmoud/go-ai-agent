@@ -285,6 +285,34 @@ func TestTick_claudeResultError_transitionsToAwaitingFeedback(t *testing.T) {
 	}
 }
 
+func TestTick_shutdownTransitionsToAwaitingFeedback(t *testing.T) {
+	gh := &fakeGitHub{
+		issues: []*githubclient.Issue{
+			{Number: 10, Title: "Task", HTMLURL: "url", Labels: []string{"ready"}},
+		},
+	}
+	// Runner returns context.Canceled to simulate shutdown mid-run.
+	runner := &fakeRunner{err: fmt.Errorf("signal: killed: %w", context.Canceled)}
+	tg := &fakeTelegram{}
+	s := testStore(t)
+
+	// Use an already-cancelled context to simulate SIGTERM.
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	loop := testLoop(t, gh, runner, tg, s)
+	_ = loop.tick(cancelledCtx)
+
+	// Task should be in awaiting-feedback, not stuck in-progress.
+	task, _ := s.GetTask("owner/repo", 10)
+	if task == nil {
+		t.Fatal("task not found")
+	}
+	if task.State != store.StateAwaitingFeedback {
+		t.Errorf("state = %q after shutdown, want awaiting-feedback", task.State)
+	}
+}
+
 func TestTick_missingWorkspace_skipsIssue(t *testing.T) {
 	gh := &fakeGitHub{
 		issues: []*githubclient.Issue{

@@ -246,12 +246,26 @@ func (l *Loop) runClaude(ctx context.Context, owner, repo string, issueNumber in
 	result, err := l.claude.Run(ctx, opts)
 	if err != nil {
 		l.log.Error("claude run failed", "err", err)
+
+		// If the main context was cancelled (SIGTERM/shutdown), use a fresh
+		// context for cleanup so GitHub API calls and store updates succeed.
+		cleanupCtx := ctx
+		if ctx.Err() != nil {
+			var cancel context.CancelFunc
+			cleanupCtx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			l.log.Info("agent shutting down, transitioning task to awaiting-feedback",
+				"repo", fullRepo, "issue", issueNumber)
+		}
+
 		_ = l.store.Log(fullRepo, issueNumber, "error", err.Error())
-		_ = l.telegram.NotifyError(ctx, issue.HTMLURL, err)
-		// Transition to awaiting-feedback so the task doesn't stay in-progress
-		// forever and block the concurrency guard from picking up new work.
-		return l.handleClarification(ctx, owner, repo, fullRepo, issueNumber, issue,
-			fmt.Sprintf("Claude process failed: %v\n\nPlease advise how to proceed.", err))
+		_ = l.telegram.NotifyError(cleanupCtx, issue.HTMLURL, err)
+		// Transition to awaiting-feedback so the task doesn't stay in-progress.
+		question := fmt.Sprintf("Claude process failed: %v\n\nPlease advise how to proceed.", err)
+		if ctx.Err() != nil {
+			question = "Madar shut down while working on this task. It will resume on the next start, or you can reply here to guide it."
+		}
+		return l.handleClarification(cleanupCtx, owner, repo, fullRepo, issueNumber, issue, question)
 	}
 
 	// Capture session ID from stream if available (first run).

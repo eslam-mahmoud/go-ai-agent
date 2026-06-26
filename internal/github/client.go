@@ -2,7 +2,9 @@ package github
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -43,13 +45,55 @@ type Client interface {
 }
 
 type githubClient struct {
-	gh *gh.Client
+	gh  *gh.Client
+	log *slog.Logger
 }
 
 func New(token string) Client {
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
 	tc := oauth2.NewClient(context.Background(), ts)
-	return &githubClient{gh: gh.NewClient(tc)}
+	return &githubClient{
+		gh:  gh.NewClient(tc),
+		log: slog.Default(),
+	}
+}
+
+// logRateLimit logs rate-limit headers at DEBUG level and returns a
+// descriptive error if the response indicates rate limiting (HTTP 429
+// or go-github RateLimitError).
+func (c *githubClient) logRateLimit(resp *gh.Response, err error) error {
+	if resp != nil && resp.Rate.Limit > 0 {
+		remaining := resp.Rate.Remaining
+		if remaining < 100 {
+			c.log.Warn("GitHub API rate limit low",
+				"remaining", remaining,
+				"limit", resp.Rate.Limit,
+				"resets_at", resp.Rate.Reset.Time.Format(time.RFC3339))
+		} else {
+			c.log.Debug("GitHub API rate limit",
+				"remaining", remaining,
+				"limit", resp.Rate.Limit)
+		}
+	}
+	if err == nil {
+		return nil
+	}
+	var rle *gh.RateLimitError
+	if errors.As(err, &rle) {
+		retryAfter := time.Until(rle.Rate.Reset.Time).Round(time.Second)
+		c.log.Warn("GitHub rate limited", "retry_after", retryAfter)
+		return fmt.Errorf("github rate limited, retry after %s: %w", retryAfter, err)
+	}
+	var ale *gh.AbuseRateLimitError
+	if errors.As(err, &ale) {
+		retryAfter := time.Duration(0)
+		if ale.RetryAfter != nil {
+			retryAfter = *ale.RetryAfter
+		}
+		c.log.Warn("GitHub abuse rate limited", "retry_after", retryAfter)
+		return fmt.Errorf("github abuse rate limited, retry after %s: %w", retryAfter, err)
+	}
+	return err
 }
 
 func (c *githubClient) GetAuthenticatedUsername(ctx context.Context) (string, error) {
@@ -69,7 +113,7 @@ func (c *githubClient) ListReadyIssues(ctx context.Context, owner, repo, readyLa
 	var issues []*Issue
 	for {
 		ghIssues, resp, err := c.gh.Issues.ListByRepo(ctx, owner, repo, opts)
-		if err != nil {
+		if err := c.logRateLimit(resp, err); err != nil {
 			return nil, fmt.Errorf("list issues: %w", err)
 		}
 		for _, i := range ghIssues {
@@ -104,7 +148,7 @@ func (c *githubClient) GetComments(ctx context.Context, owner, repo string, numb
 	var comments []*Comment
 	for {
 		ghComments, resp, err := c.gh.Issues.ListComments(ctx, owner, repo, number, opts)
-		if err != nil {
+		if err := c.logRateLimit(resp, err); err != nil {
 			return nil, fmt.Errorf("list comments: %w", err)
 		}
 		for _, c := range ghComments {

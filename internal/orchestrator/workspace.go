@@ -32,10 +32,13 @@ func EnsureWorkspaces(ctx context.Context, cfg *config.Config, log *slog.Logger)
 			return fmt.Errorf("create workspace parent for %s: %w", fullRepo, err)
 		}
 
-		cloneURL := fmt.Sprintf("https://github.com/%s.git", fullRepo)
+		// Use authenticated HTTPS so private repos clone without SSH key setup.
+		// Token is embedded in the URL; git does not log credential URLs by default.
+		cloneURL := fmt.Sprintf("https://x-access-token:%s@github.com/%s.git", cfg.GitHub.Token, fullRepo)
 		log.Info("cloning workspace", "repo", fullRepo, "dest", dest)
 
-		cmd := exec.CommandContext(ctx, "git", "clone", "--depth=1", cloneURL, dest)
+		// Full clone (no --depth) so subsequent git pull operations work reliably.
+		cmd := exec.CommandContext(ctx, "git", "clone", cloneURL, dest)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {

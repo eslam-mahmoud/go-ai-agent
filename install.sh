@@ -36,7 +36,7 @@ bold()    { echo -e "${BOLD}$*${RESET}"; }
 # ── state helpers ─────────────────────────────────────────────────────────────
 state_get() { grep "^$1=" "$STATE_PATH" 2>/dev/null | cut -d= -f2 || true; }
 state_set() {
-    mkdir -p "$MADAR_HOME"
+    mkdir -p "$MADAR_HOME" 2>/dev/null || true
     if grep -q "^$1=" "$STATE_PATH" 2>/dev/null; then
         sed -i.bak "s|^$1=.*|$1=$2|" "$STATE_PATH" && rm -f "$STATE_PATH.bak"
     else
@@ -266,7 +266,6 @@ install_binary() {
         return
     fi
     info "Installing Madar binary…"
-    mkdir -p "$MADAR_HOME"
 
     # Try to download pre-built release first
     local release_url
@@ -358,7 +357,6 @@ configure_credentials() {
     echo ""
 
     # Write .env
-    mkdir -p "$MADAR_HOME"
     # Preserve any extra keys that were already in .env
     local extra_keys=""
     if [[ -f "$ENV_PATH" ]]; then
@@ -407,7 +405,7 @@ configure_repos() {
     [[ -z "$repos_yaml" ]] && repos_yaml="  # - owner/project-a"$'\n'
 
     # Write config.yaml
-    mkdir -p "$MADAR_HOME/workspaces"
+    mkdir -p "$MADAR_HOME/workspaces"  # workspaces subdir is always safe (user-owned)
     cat > "$CONFIG_PATH" <<EOF
 poll_interval_seconds: 45
 
@@ -626,6 +624,13 @@ main() {
     bold "║   Autonomous coding agent             ║"
     bold "╚═══════════════════════════════════════╝"
     echo ""
+
+    # Create the install directory owned by the current user early so all
+    # subsequent writes (state file, .env, config, binary) work without sudo.
+    if [[ ! -d "$MADAR_HOME" ]]; then
+        run_privileged mkdir -p "$MADAR_HOME"
+        run_privileged chown "$(id -un):$(id -gn)" "$MADAR_HOME"
+    fi
 
     case "$mode" in
         uninstall)

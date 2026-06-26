@@ -138,16 +138,18 @@ func TestListByState(t *testing.T) {
 func TestCountActive(t *testing.T) {
 	s := openTestStore(t)
 	_, _ = s.UpsertTask("r", 1, StateInProgress, "s")
-	_, _ = s.UpsertTask("r", 2, StateAwaitingFeedback, "s")
+	_, _ = s.UpsertTask("r", 2, StateAwaitingFeedback, "s") // parked — not counted
 	_, _ = s.UpsertTask("r", 3, StateDone, "s")
 	_, _ = s.UpsertTask("r", 4, StateReady, "s")
+	_, _ = s.UpsertTask("r", 5, StateInProgress, "s") // second active Claude run
 
 	count, err := s.CountActive()
 	if err != nil {
 		t.Fatalf("CountActive: %v", err)
 	}
+	// Only in-progress tasks count; awaiting-feedback is excluded.
 	if count != 2 {
-		t.Errorf("CountActive = %d, want 2", count)
+		t.Errorf("CountActive = %d, want 2 (awaiting-feedback excluded)", count)
 	}
 }
 

@@ -67,6 +67,10 @@ ready → in-progress → done (closed)
 State is expressed as GitHub Issue labels. SQLite holds session IDs and
 timestamps. Never transition state without updating both.
 
+**Concurrency guard:** only `in-progress` tasks count toward `max_parallel`.
+`awaiting-feedback` tasks are parked (Claude is idle) and do not block new
+work from being picked up.
+
 ## Adding a New Enhancement
 
 1. Add config fields to `internal/config/config.go` with defaults in

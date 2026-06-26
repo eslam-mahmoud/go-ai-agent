@@ -163,10 +163,13 @@ func (c *githubClient) ReplaceLabels(ctx context.Context, owner, repo string, nu
 }
 
 func (c *githubClient) CreateLabel(ctx context.Context, owner, repo, name, color string) error {
-	_, _, err := c.gh.Issues.CreateLabel(ctx, owner, repo, &gh.Label{
+	_, resp, err := c.gh.Issues.CreateLabel(ctx, owner, repo, &gh.Label{
 		Name:  gh.String(name),
 		Color: gh.String(color),
 	})
+	if err != nil && resp != nil && resp.StatusCode == 422 {
+		return nil // label already exists — treat as success
+	}
 	return err
 }
 

@@ -78,6 +78,34 @@ func main() {
 	defer stop()
 
 	log.Info("madar ready", "version", Version, "repos", cfg.Repos, "db", cfg.DBPath)
+	log.Debug("effective config",
+		"poll_interval", cfg.PollInterval,
+		"max_parallel", cfg.Concurrency.MaxParallel,
+		"ci_enabled", cfg.CI.Enabled,
+		"claude_bin", claudeBin,
+		"skip_permissions", cfg.Claude.SkipPermissions)
+
+	// Ensure required labels exist on every configured repo. This catches
+	// misconfigured label names early and bootstraps fresh repos.
+	requiredLabels := map[string]string{
+		cfg.Labels.Ready:            "0075ca",
+		cfg.Labels.InProgress:       "e4e669",
+		cfg.Labels.AwaitingFeedback: "d93f0b",
+		cfg.Labels.Done:             "0e8a16",
+	}
+	for _, fullRepo := range cfg.Repos {
+		owner, repo, err := githubclient.SplitRepo(fullRepo)
+		if err != nil {
+			log.Warn("invalid repo, skipping label check", "repo", fullRepo)
+			continue
+		}
+		if err := ghClient.EnsureLabels(ctx, owner, repo, requiredLabels); err != nil {
+			log.Warn("label setup failed", "repo", fullRepo, "err", err)
+		} else {
+			log.Debug("labels verified", "repo", fullRepo)
+		}
+	}
+
 	if err := orchestrator.EnsureWorkspaces(ctx, cfg, log); err != nil {
 		log.Error("workspace setup failed", "err", err)
 		os.Exit(1)

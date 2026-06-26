@@ -1,4 +1,4 @@
-poll_interval_seconds: 15
+poll_interval_seconds: 45
 
 concurrency:
   enabled: false

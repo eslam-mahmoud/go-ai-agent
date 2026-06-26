@@ -90,11 +90,12 @@ convention above is mandatory — the CI watcher looks for that exact branch.
 
 ## Common Pitfalls
 
-- `BuildFirstRunPrompt` takes `issueNumber int` — don't forget it when adding
-  new call sites.
-- `escapeMarkdown` must escape `_ * \` [ ` — all four MarkdownV1 specials.
+- `BuildFirstRunPrompt` signature: `(issueTitle, issueBody, threadComments string, issueNumber, maxBodyChars int)` — both int params required.
+- `BuildResumePrompt` takes `[]claude.ReplyEntry{Author, Body, Timestamp string}` — not a plain string. Build from `Comment.Author`, `Comment.Body`, `Comment.CreatedAt.Format(time.RFC3339)`.
+- `escapeMarkdown` must escape `_ * backtick [` — all four MarkdownV1 specials.
 - Telegram messages are capped at 4096 bytes in `send()`.
-- `gitEnvWithToken` injects credentials via environment; never pass a token
-  in a git URL argument or config file.
-- `ci.wait_timeout` is checked in `advanceCITask` against `task.UpdatedAt` —
-  make sure `UpdatedAt` is refreshed when CI state changes.
+- `gitEnvWithToken` injects credentials via environment; never pass a token in a git URL argument or config file.
+- `ci.wait_timeout` is checked against `task.CIWatchStartedAt` (set once when CI watching starts), NOT `task.UpdatedAt` — retries do not reset the deadline.
+- `CountActive()` counts only `state='in-progress' AND ci_state=''`. CI-watching and awaiting-feedback tasks are excluded so they don't block new work.
+- Prune interval and retention are in `cleanup:` config (default 24h interval, 30d audit, 90d tasks).
+- Run `./madar -status` to inspect active tasks without reading the database directly.

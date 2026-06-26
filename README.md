@@ -307,12 +307,15 @@ repos:
 context_dir: .claude-context
 
 claude:
+  bin: ""                      # path to claude CLI; empty = find "claude" on PATH
   output_format: stream-json   # always stream-json (required for session IDs)
   max_turns: 40                # cap agentic turns per invocation; overflow = error
   run_timeout: 30m             # kill the claude process after this wall time
   auto_compact: false          # Madar manages context via handoff files + session rotation
   context_reset_threshold: 0.6 # fraction of model context window at which to rotate session
   skip_permissions: true       # --dangerously-skip-permissions (required for headless operation)
+  max_thread_chars: 8000       # max chars of human thread in first-run prompt (oldest dropped first)
+  max_issue_body_chars: 4000   # max chars of issue body in first-run prompt
 
 # CI/CD feedback loop — watch check suites and auto-retry on failure
 ci:
@@ -320,6 +323,12 @@ ci:
   max_retries: 3       # re-invoke Claude up to N times on CI failure
   poll_interval: 30s   # how often to poll check suite status
   wait_timeout: 20m    # give up waiting for CI after this wall time
+
+# Periodic database housekeeping
+cleanup:
+  interval: 24h              # how often to run pruning
+  audit_log_retention: 720h  # delete audit entries older than 30 days
+  task_retention: 2160h      # delete done tasks older than 90 days
 
 # Local paths
 db_path: /opt/madar/madar.db
@@ -408,6 +417,8 @@ sudo journalctl -fu madar   # follow logs
 | `-config` | `config.yaml` | Path to the YAML configuration file |
 | `-env` | `.env` | Path to the .env file (skipped if the file doesn't exist) |
 | `-log-level` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
+| `-version` | — | Print version, commit, and build date then exit |
+| `-status` | — | Print active tasks, CI-watching tasks, awaiting-feedback tasks then exit |
 
 ---
 

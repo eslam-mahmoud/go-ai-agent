@@ -156,8 +156,9 @@ func (l *Loop) resumeIfReplied(ctx context.Context, owner, repo string, task *st
 		return err
 	}
 
-	// Find first comment not from a bot / our own agent.
-	var humanReply string
+	// Collect ALL human comments posted after our clarification — not just the first.
+	// Humans often send corrections or additions in follow-up comments.
+	var humanReplies []string
 	for _, c := range comments {
 		if c.Author == "" {
 			continue
@@ -169,15 +170,16 @@ func (l *Loop) resumeIfReplied(ctx context.Context, owner, repo string, task *st
 		if isAgentComment(c.Body) {
 			continue
 		}
-		humanReply = c.Body
-		break
+		humanReplies = append(humanReplies, fmt.Sprintf("@%s: %s", c.Author, c.Body))
 	}
-	if humanReply == "" {
+	if len(humanReplies) == 0 {
 		return nil
 	}
 
-	l.log.Info("human replied, resuming task", "repo", task.Repo, "issue", task.IssueNumber)
-	_ = l.store.Log(task.Repo, task.IssueNumber, "resume", "human replied")
+	l.log.Info("human replied, resuming task",
+		"repo", task.Repo, "issue", task.IssueNumber, "replies", len(humanReplies))
+	_ = l.store.Log(task.Repo, task.IssueNumber, "resume",
+		fmt.Sprintf("%d human reply/replies", len(humanReplies)))
 
 	// Transition back to in-progress.
 	if _, err := l.store.UpsertTask(task.Repo, task.IssueNumber, store.StateInProgress, ""); err != nil {
@@ -192,8 +194,9 @@ func (l *Loop) resumeIfReplied(ctx context.Context, owner, repo string, task *st
 		return err
 	}
 
-	// Resume Claude session with the human reply.
-	prompt := claude.BuildResumePrompt(humanReply)
+	// Resume Claude session with all human replies concatenated.
+	fullReply := strings.Join(humanReplies, "\n\n")
+	prompt := claude.BuildResumePrompt(fullReply)
 	return l.runClaude(ctx, owner, repo, task.IssueNumber, issue, task.SessionID, prompt, true)
 }
 

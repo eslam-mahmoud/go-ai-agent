@@ -69,11 +69,15 @@ func (f *fakeGitHub) GetFailedStepOutput(_ context.Context, _, _, _ string) (str
 func (f *fakeGitHub) CloseIssue(_ context.Context, _, _ string, _ int) error { return nil }
 
 type fakeRunner struct {
-	result *claude.Result
-	err    error
+	result        *claude.Result
+	err           error
+	capturePrompt *string // if non-nil, captures the prompt from the last Run call
 }
 
-func (f *fakeRunner) Run(_ context.Context, _ claude.RunOptions) (*claude.Result, error) {
+func (f *fakeRunner) Run(_ context.Context, opts claude.RunOptions) (*claude.Result, error) {
+	if f.capturePrompt != nil {
+		*f.capturePrompt = opts.Prompt
+	}
 	return f.result, f.err
 }
 
@@ -400,6 +404,37 @@ func TestTick_capacityGuard(t *testing.T) {
 	task, _ := s.GetTask("owner/repo", 3)
 	if task != nil {
 		t.Errorf("issue 3 should not have been claimed while another is active, state=%q", task.State)
+	}
+}
+
+func TestResumeIfReplied_collectsAllHumanReplies(t *testing.T) {
+	clarTime := time.Now().UTC().Add(-10 * time.Minute)
+	gh := &fakeGitHub{
+		comments: []*githubclient.Comment{
+			{Body: "First answer", Author: "human-user", CreatedAt: clarTime.Add(time.Minute)},
+			{Body: "Correction to first answer", Author: "human-user", CreatedAt: clarTime.Add(2 * time.Minute)},
+		},
+	}
+	var capturedPrompt string
+	runner := &fakeRunner{result: &claude.Result{Output: "done"}, capturePrompt: &capturedPrompt}
+	tg := &fakeTelegram{}
+	s := testStore(t)
+
+	_, _ = s.UpsertTask("owner/repo", 55, store.StateAwaitingFeedback, "sess-55")
+	_ = s.SetClarificationTime("owner/repo", 55, clarTime)
+
+	loop := testLoop(t, gh, runner, tg, s)
+	loop.botUsername = "madar-bot"
+
+	if err := loop.checkAwaitingFeedback(context.Background()); err != nil {
+		t.Fatalf("checkAwaitingFeedback: %v", err)
+	}
+
+	if !containsStr(capturedPrompt, "First answer") {
+		t.Error("resume prompt should contain first reply")
+	}
+	if !containsStr(capturedPrompt, "Correction to first answer") {
+		t.Error("resume prompt should contain second reply")
 	}
 }
 

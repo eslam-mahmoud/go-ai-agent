@@ -244,18 +244,23 @@ func BuildResumePrompt(humanReply string) string {
 }
 
 // BuildCIFixPrompt creates the prompt sent to Claude when CI fails.
-// It provides the failure output so Claude can diagnose and fix the issue.
-func BuildCIFixPrompt(failureOutput string, retryN, maxRetries int) string {
+// branch and prNumber tell Claude exactly where to push so it doesn't
+// open a new branch or PR instead of amending the existing one.
+func BuildCIFixPrompt(failureOutput, branch string, prNumber, retryN, maxRetries int) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(
-		"CI failed on attempt %d of %d. Fix the failures and push again.\n\n",
-		retryN, maxRetries,
+		"CI failed on attempt %d of %d.\n\n", retryN, maxRetries,
 	))
-	sb.WriteString("If you cannot fix the issue within this attempt, respond with:\n")
+	sb.WriteString(fmt.Sprintf(
+		"IMPORTANT: Push your fix to the existing branch `%s` (PR #%d is already open). "+
+			"Do NOT create a new branch or open a new PR.\n\n",
+		branch, prNumber,
+	))
+	sb.WriteString("If you cannot fix the issue, respond with:\n")
 	sb.WriteString("NEEDS_CLARIFICATION: <description of the problem>\n\n")
 	sb.WriteString("--- CI Failure Output ---\n")
 	sb.WriteString(failureOutput)
 	sb.WriteString("\n------------------------\n\n")
-	sb.WriteString("Diagnose the root cause, fix it, and push the corrected code.")
+	sb.WriteString("Diagnose the root cause, fix it, and push to the branch above.")
 	return sb.String()
 }

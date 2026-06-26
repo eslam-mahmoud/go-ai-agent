@@ -146,7 +146,7 @@ func (l *Loop) handleCIFailure(ctx context.Context, owner, repo string, task *st
 	}
 
 	// Resume the Claude session with the failure details.
-	prompt := claude.BuildCIFixPrompt(failureOutput, retries, l.cfg.CI.MaxRetries)
+	prompt := claude.BuildCIFixPrompt(failureOutput, branch, task.PRNumber, retries, l.cfg.CI.MaxRetries)
 	workDir := filepath.Join(l.cfg.WorkspaceDir, owner, repo)
 	opts := claude.RunOptions{
 		WorkDir:         workDir,

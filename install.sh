@@ -412,6 +412,13 @@ configure_repos() {
         local repo_input
         read -rp "  Repo (or Enter to finish): " repo_input
         [[ -z "$repo_input" ]] && break
+        # Normalise: strip https://github.com/ prefix and trailing slashes
+        repo_input=$(echo "$repo_input" \
+            | sed 's|https://github\.com/||; s|http://github\.com/||; s|github\.com/||; s|/$||')
+        if [[ "$repo_input" != */* ]]; then
+            warn "Expected format: owner/repo — got '$repo_input'. Skipping."
+            continue
+        fi
         repos+=("$repo_input")
     done
 

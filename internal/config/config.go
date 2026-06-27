@@ -31,6 +31,7 @@ type Config struct {
 	Telegram     TelegramConfig
 	DBPath       string
 	WorkspaceDir string
+	ConfigPath   string // path of the loaded config file; set by Load
 }
 
 // RepoNames returns the name field of every configured repo.
@@ -279,6 +280,7 @@ func Load(configPath, envPath string) (*Config, error) {
 		},
 		DBPath:       raw.DBPath,
 		WorkspaceDir: raw.WorkspaceDir,
+		ConfigPath:   configPath,
 	}
 
 	return cfg, nil

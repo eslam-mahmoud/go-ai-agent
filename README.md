@@ -219,6 +219,19 @@ The installer:
 
 The installer is **idempotent** — re-running it resumes from where it left off using a checkpoint file at `/opt/madar/.install-state`.
 
+**Upgrade to the latest release:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eslam-mahmoud/go-ai-agent/main/install.sh | bash -s -- --update
+```
+
+Stops the service, downloads the latest binary from GitHub Releases, verifies the sha256 checksum, swaps the binary, and restarts the service. You can also upgrade from within the running agent:
+
+```bash
+/opt/madar/madar -update
+sudo systemctl restart madar
+```
+
 **Update credentials later:**
 
 ```bash
@@ -451,6 +464,7 @@ sudo journalctl -fu madar   # follow logs
 | `-log-level` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
 | `-version` | — | Print version, commit, and build date then exit |
 | `-status` | — | Print active tasks, CI-watching tasks, awaiting-feedback tasks then exit |
+| `-update` | — | Check for a newer release, download it, and replace the running binary then exit |
 
 ---
 

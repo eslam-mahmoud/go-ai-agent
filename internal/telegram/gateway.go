@@ -9,10 +9,34 @@ import (
 	"strings"
 )
 
+// Update represents a single inbound Telegram update.
+type Update struct {
+	UpdateID int64    `json:"update_id"`
+	Message  *Message `json:"message"`
+}
+
+// Message is the subset of Telegram message fields Madar uses.
+type Message struct {
+	MessageID int64  `json:"message_id"`
+	Text      string `json:"text"`
+	Chat      struct {
+		ID int64 `json:"id"`
+	} `json:"chat"`
+	From struct {
+		ID       int64  `json:"id"`
+		Username string `json:"username"`
+	} `json:"from"`
+}
+
 type Gateway interface {
 	NotifyClarification(ctx context.Context, issueURL, question string) error
 	NotifyCompletion(ctx context.Context, issueURL, summary string) error
 	NotifyError(ctx context.Context, issueURL string, err error) error
+	// GetUpdates polls for new inbound messages starting from offset.
+	// Returns nil slice (not error) when the gateway is not configured.
+	GetUpdates(ctx context.Context, offset int64) ([]Update, error)
+	// Reply sends a message to a specific chat by its numeric ID.
+	Reply(ctx context.Context, chatID int64, text string) error
 }
 
 type gateway struct {
@@ -128,6 +152,38 @@ func (g *gateway) send(ctx context.Context, chatID, text string) error {
 		return fmt.Errorf("telegram API returned %d", resp.StatusCode)
 	}
 	return nil
+}
+
+func (g *gateway) GetUpdates(ctx context.Context, offset int64) ([]Update, error) {
+	if g.botToken == "" {
+		return nil, nil
+	}
+	url := fmt.Sprintf("%s/bot%s/getUpdates?offset=%d&limit=100", g.apiBase, g.botToken, offset)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		OK     bool     `json:"ok"`
+		Result []Update `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	if !result.OK {
+		return nil, fmt.Errorf("telegram getUpdates returned ok=false")
+	}
+	return result.Result, nil
+}
+
+func (g *gateway) Reply(ctx context.Context, chatID int64, text string) error {
+	return g.send(ctx, fmt.Sprintf("%d", chatID), text)
 }
 
 // escapeMarkdown escapes all Telegram MarkdownV1 special characters.

@@ -43,6 +43,8 @@ type Client interface {
 	GetFailedStepOutput(ctx context.Context, owner, repo, branch string) (string, error)
 	// MergePullRequest merges prNumber using method ("merge", "squash", or "rebase").
 	MergePullRequest(ctx context.Context, owner, repo string, prNumber int, method string) error
+	// CreateIssue opens a new issue with the given title, body, and labels.
+	CreateIssue(ctx context.Context, owner, repo, title, body string, labels []string) (*Issue, error)
 	CloseIssue(ctx context.Context, owner, repo string, number int) error
 }
 
@@ -217,6 +219,19 @@ func (c *githubClient) CreateLabel(ctx context.Context, owner, repo, name, color
 		return nil // label already exists — treat as success
 	}
 	return err
+}
+
+func (c *githubClient) CreateIssue(ctx context.Context, owner, repo, title, body string, labels []string) (*Issue, error) {
+	req := &gh.IssueRequest{
+		Title:  gh.String(title),
+		Body:   gh.String(body),
+		Labels: &labels,
+	}
+	i, _, err := c.gh.Issues.Create(ctx, owner, repo, req)
+	if err != nil {
+		return nil, fmt.Errorf("create issue: %w", err)
+	}
+	return toIssue(i), nil
 }
 
 func (c *githubClient) MergePullRequest(ctx context.Context, owner, repo string, prNumber int, method string) error {

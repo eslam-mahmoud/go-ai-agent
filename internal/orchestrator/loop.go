@@ -31,6 +31,7 @@ type Loop struct {
 	currentVersion      string // set via SetCurrentVersion; empty disables daily update check
 	lastUpdateCheckAt   time.Time
 	lastNotifiedVersion string
+	telegramOffset      int64 // next getUpdates offset; advances as messages are consumed
 }
 
 // SetCurrentVersion enables the daily background update check.
@@ -111,6 +112,9 @@ func (l *Loop) tick(ctx context.Context) error {
 
 	// Run CI and feedback checks unconditionally — they don't need the active
 	// count and should not be skipped by a transient SQLite error.
+
+	// 0. Check for inbound Telegram commands (non-blocking poll).
+	l.checkTelegramCommands(ctx)
 
 	// 1. Check CI-pending tasks.
 	if err := l.checkCIPending(ctx); err != nil {

@@ -69,6 +69,9 @@ func (f *fakeGitHub) GetFailedStepOutput(_ context.Context, _, _, _ string) (str
 func (f *fakeGitHub) MergePullRequest(_ context.Context, _, _ string, _ int, _ string) error {
 	return nil
 }
+func (f *fakeGitHub) CreateIssue(_ context.Context, _, _, _, _ string, _ []string) (*githubclient.Issue, error) {
+	return &githubclient.Issue{Number: 99, HTMLURL: "https://github.com/owner/repo/issues/99"}, nil
+}
 func (f *fakeGitHub) CloseIssue(_ context.Context, _, _ string, _ int) error { return nil }
 
 type fakeRunner struct {
@@ -102,6 +105,10 @@ func (f *fakeTelegram) NotifyError(_ context.Context, _ string, _ error) error {
 	f.errorCalled = true
 	return nil
 }
+func (f *fakeTelegram) GetUpdates(_ context.Context, _ int64) ([]telegram.Update, error) {
+	return nil, nil
+}
+func (f *fakeTelegram) Reply(_ context.Context, _ int64, _ string) error { return nil }
 
 // --- helpers ---
 

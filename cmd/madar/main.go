@@ -91,7 +91,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	log.Info("madar ready", "version", Version, "repos", cfg.Repos, "db", cfg.DBPath)
+	log.Info("madar ready", "version", Version, "repos", cfg.RepoNames(), "db", cfg.DBPath)
 	log.Debug("effective config",
 		"poll_interval", cfg.PollInterval,
 		"max_parallel", cfg.Concurrency.MaxParallel,
@@ -107,7 +107,8 @@ func main() {
 		cfg.Labels.AwaitingFeedback: "d93f0b",
 		cfg.Labels.Done:             "0e8a16",
 	}
-	for _, fullRepo := range cfg.Repos {
+	for _, repoCfg := range cfg.Repos {
+		fullRepo := repoCfg.Name
 		owner, repo, err := githubclient.SplitRepo(fullRepo)
 		if err != nil {
 			log.Warn("invalid repo, skipping label check", "repo", fullRepo)
@@ -165,7 +166,7 @@ func printStatus(s *store.Store, cfg *config.Config) {
 	fmt.Printf("madar status\n")
 	fmt.Printf("  schema version : %d\n", v)
 	fmt.Printf("  db             : %s\n", cfg.DBPath)
-	fmt.Printf("  repos          : %v\n", cfg.Repos)
+	fmt.Printf("  repos          : %v\n", cfg.RepoNames())
 	fmt.Printf("  active (claude): %d\n", active)
 	fmt.Printf("  in-progress    : %d\n", len(inProgress))
 	for _, t := range inProgress {

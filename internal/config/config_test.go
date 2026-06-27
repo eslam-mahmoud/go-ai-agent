@@ -43,8 +43,8 @@ func TestLoad_defaults(t *testing.T) {
 	if cfg.Claude.ContextResetThreshold != 0.6 {
 		t.Errorf("Claude.ContextResetThreshold = %v, want 0.6", cfg.Claude.ContextResetThreshold)
 	}
-	if len(cfg.Repos) != 1 || cfg.Repos[0] != "owner/repo" {
-		t.Errorf("Repos = %v, want [owner/repo]", cfg.Repos)
+	if len(cfg.Repos) != 1 || cfg.Repos[0].Name != "owner/repo" {
+		t.Errorf("Repos = %v, want [{owner/repo}]", cfg.Repos)
 	}
 }
 

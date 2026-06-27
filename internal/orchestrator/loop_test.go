@@ -66,6 +66,9 @@ func (f *fakeGitHub) GetCheckSuiteStatus(_ context.Context, _, _, _ string) (git
 func (f *fakeGitHub) GetFailedStepOutput(_ context.Context, _, _, _ string) (string, error) {
 	return "", nil
 }
+func (f *fakeGitHub) MergePullRequest(_ context.Context, _, _ string, _ int, _ string) error {
+	return nil
+}
 func (f *fakeGitHub) CloseIssue(_ context.Context, _, _ string, _ int) error { return nil }
 
 type fakeRunner struct {
@@ -112,7 +115,7 @@ func testConfig() *config.Config {
 			AwaitingFeedback: "awaiting-feedback",
 			Done:             "done",
 		},
-		Repos:        []string{"owner/repo"},
+		Repos:        []config.RepoConfig{{Name: "owner/repo"}},
 		ContextDir:   ".claude-context",
 		WorkspaceDir: "/tmp/madar/workspaces",
 		Claude: config.ClaudeConfig{

@@ -50,7 +50,8 @@ func (l *Loop) pullWorkspace(ctx context.Context, owner, repo string) {
 // Credentials are injected via process environment so the token is never
 // written into the cloned repo's .git/config.
 func EnsureWorkspaces(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
-	for _, fullRepo := range cfg.Repos {
+	for _, repoCfg := range cfg.Repos {
+		fullRepo := repoCfg.Name
 		owner, repo, err := githubclient.SplitRepo(fullRepo)
 		if err != nil {
 			log.Warn("invalid repo in config, skipping", "repo", fullRepo)

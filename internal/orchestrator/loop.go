@@ -218,7 +218,8 @@ func (l *Loop) resumeIfReplied(ctx context.Context, owner, repo string, task *st
 }
 
 func (l *Loop) pickAndRun(ctx context.Context) error {
-	for _, fullRepo := range l.cfg.Repos {
+	for _, repoCfg := range l.cfg.Repos {
+		fullRepo := repoCfg.Name
 		owner, repo, err := githubclient.SplitRepo(fullRepo)
 		if err != nil {
 			l.log.Warn("invalid repo", "repo", fullRepo)
@@ -238,9 +239,9 @@ func (l *Loop) pickAndRun(ctx context.Context) error {
 
 		// Ensure workspace exists for this specific repo before claiming.
 		// Handles repos added to config after initial startup.
-		repoCfg := *l.cfg
-		repoCfg.Repos = []string{fullRepo}
-		if err := EnsureWorkspaces(ctx, &repoCfg, l.log); err != nil {
+		singleRepoCfg := *l.cfg
+		singleRepoCfg.Repos = []config.RepoConfig{{Name: fullRepo}}
+		if err := EnsureWorkspaces(ctx, &singleRepoCfg, l.log); err != nil {
 			l.log.Error("workspace setup failed, skipping issue", "repo", fullRepo, "err", err)
 			continue
 		}

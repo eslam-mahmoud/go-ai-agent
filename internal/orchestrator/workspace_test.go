@@ -61,7 +61,7 @@ func TestEnsureWorkspaces_alreadyExists(t *testing.T) {
 	}
 
 	cfg := &config.Config{
-		Repos:        []string{"owner/repo"},
+		Repos:        []config.RepoConfig{{Name: "owner/repo"}},
 		WorkspaceDir: dir,
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -74,7 +74,7 @@ func TestEnsureWorkspaces_alreadyExists(t *testing.T) {
 
 func TestEnsureWorkspaces_invalidRepo(t *testing.T) {
 	cfg := &config.Config{
-		Repos:        []string{"noslash"},
+		Repos:        []config.RepoConfig{{Name: "noslash"}},
 		WorkspaceDir: t.TempDir(),
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -87,7 +87,7 @@ func TestEnsureWorkspaces_invalidRepo(t *testing.T) {
 
 func TestEnsureWorkspaces_emptyRepos(t *testing.T) {
 	cfg := &config.Config{
-		Repos:        []string{},
+		Repos:        []config.RepoConfig{},
 		WorkspaceDir: t.TempDir(),
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))

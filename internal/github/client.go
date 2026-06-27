@@ -41,6 +41,8 @@ type Client interface {
 	EnsureLabels(ctx context.Context, owner, repo string, labels map[string]string) error
 	GetCheckSuiteStatus(ctx context.Context, owner, repo, branch string) (CheckStatus, error)
 	GetFailedStepOutput(ctx context.Context, owner, repo, branch string) (string, error)
+	// MergePullRequest merges prNumber using method ("merge", "squash", or "rebase").
+	MergePullRequest(ctx context.Context, owner, repo string, prNumber int, method string) error
 	CloseIssue(ctx context.Context, owner, repo string, number int) error
 }
 
@@ -214,6 +216,16 @@ func (c *githubClient) CreateLabel(ctx context.Context, owner, repo, name, color
 	if err != nil && resp != nil && resp.StatusCode == 422 {
 		return nil // label already exists — treat as success
 	}
+	return err
+}
+
+func (c *githubClient) MergePullRequest(ctx context.Context, owner, repo string, prNumber int, method string) error {
+	if method == "" {
+		method = "merge"
+	}
+	_, _, err := c.gh.PullRequests.Merge(ctx, owner, repo, prNumber, "", &gh.PullRequestOptions{
+		MergeMethod: method,
+	})
 	return err
 }
 

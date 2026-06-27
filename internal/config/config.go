@@ -10,11 +10,19 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// RepoConfig describes a watched repository. The YAML form accepts either a
+// plain string ("owner/repo") or an object with optional per-repo overrides.
+type RepoConfig struct {
+	Name        string
+	AutoMerge   *bool  // nil → inherit from CI.AutoMerge
+	MergeMethod string // "" → inherit from CI.MergeMethod; valid: merge|squash|rebase
+}
+
 type Config struct {
 	PollInterval time.Duration
 	Concurrency  ConcurrencyConfig
 	Labels       LabelsConfig
-	Repos        []string
+	Repos        []RepoConfig
 	ContextDir   string
 	Claude       ClaudeConfig
 	CI           CIConfig
@@ -25,11 +33,47 @@ type Config struct {
 	WorkspaceDir string
 }
 
+// RepoNames returns the name field of every configured repo.
+func (cfg *Config) RepoNames() []string {
+	names := make([]string, len(cfg.Repos))
+	for i, r := range cfg.Repos {
+		names[i] = r.Name
+	}
+	return names
+}
+
+// EffectiveAutoMerge returns the auto-merge setting for fullRepo,
+// falling back to the global CI.AutoMerge when no per-repo override is set.
+func (cfg *Config) EffectiveAutoMerge(fullRepo string) bool {
+	for _, r := range cfg.Repos {
+		if r.Name == fullRepo && r.AutoMerge != nil {
+			return *r.AutoMerge
+		}
+	}
+	return cfg.CI.AutoMerge
+}
+
+// EffectiveMergeMethod returns the merge method for fullRepo,
+// falling back to CI.MergeMethod and then "merge".
+func (cfg *Config) EffectiveMergeMethod(fullRepo string) string {
+	for _, r := range cfg.Repos {
+		if r.Name == fullRepo && r.MergeMethod != "" {
+			return r.MergeMethod
+		}
+	}
+	if cfg.CI.MergeMethod != "" {
+		return cfg.CI.MergeMethod
+	}
+	return "merge"
+}
+
 type CIConfig struct {
 	Enabled      bool
 	MaxRetries   int
 	PollInterval time.Duration
 	WaitTimeout  time.Duration
+	AutoMerge    bool   // merge PR automatically when CI passes (default false)
+	MergeMethod  string // merge | squash | rebase (default "merge")
 }
 
 type CleanupConfig struct {
@@ -71,10 +115,37 @@ type TelegramConfig struct {
 	AllowedIDs []string
 }
 
+// rawRepoConfig supports both plain-string and object YAML forms:
+//
+//	repos:
+//	  - owner/repo               # plain string
+//	  - name: owner/repo2        # object with overrides
+//	    auto_merge: true
+//	    merge_method: squash
+type rawRepoConfig struct {
+	Name        string `yaml:"name"`
+	AutoMerge   *bool  `yaml:"auto_merge"`
+	MergeMethod string `yaml:"merge_method"`
+}
+
+func (r *rawRepoConfig) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		r.Name = value.Value
+		return nil
+	}
+	type alias rawRepoConfig
+	var a alias
+	if err := value.Decode(&a); err != nil {
+		return err
+	}
+	*r = rawRepoConfig(a)
+	return nil
+}
+
 type rawConfig struct {
 	PollIntervalSeconds int `yaml:"poll_interval_seconds"`
 	Concurrency         struct {
-		Enabled    bool `yaml:"enabled"`
+		Enabled     bool `yaml:"enabled"`
 		MaxParallel int  `yaml:"max_parallel"`
 	} `yaml:"concurrency"`
 	Labels struct {
@@ -83,8 +154,8 @@ type rawConfig struct {
 		AwaitingFeedback string `yaml:"awaiting_feedback"`
 		Done             string `yaml:"done"`
 	} `yaml:"labels"`
-	Repos      []string `yaml:"repos"`
-	ContextDir string   `yaml:"context_dir"`
+	Repos      []rawRepoConfig `yaml:"repos"`
+	ContextDir string          `yaml:"context_dir"`
 	Claude     struct {
 		Bin                   string  `yaml:"bin"`
 		OutputFormat          string  `yaml:"output_format"`
@@ -97,10 +168,12 @@ type rawConfig struct {
 		MaxIssueBodyChars     int     `yaml:"max_issue_body_chars"`
 	} `yaml:"claude"`
 	CI struct {
-		Enabled          bool   `yaml:"enabled"`
-		MaxRetries       int    `yaml:"max_retries"`
-		PollIntervalStr  string `yaml:"poll_interval"`
-		WaitTimeoutStr   string `yaml:"wait_timeout"`
+		Enabled         bool   `yaml:"enabled"`
+		MaxRetries      int    `yaml:"max_retries"`
+		PollIntervalStr string `yaml:"poll_interval"`
+		WaitTimeoutStr  string `yaml:"wait_timeout"`
+		AutoMerge       bool   `yaml:"auto_merge"`
+		MergeMethod     string `yaml:"merge_method"`
 	} `yaml:"ci"`
 	Cleanup struct {
 		IntervalStr          string `yaml:"interval"`
@@ -171,7 +244,7 @@ func Load(configPath, envPath string) (*Config, error) {
 			AwaitingFeedback: raw.Labels.AwaitingFeedback,
 			Done:             raw.Labels.Done,
 		},
-		Repos:      raw.Repos,
+		Repos:      rawToRepoConfigs(raw.Repos),
 		ContextDir: raw.ContextDir,
 		Claude: ClaudeConfig{
 			Bin:                   raw.Claude.Bin,
@@ -196,6 +269,8 @@ func Load(configPath, envPath string) (*Config, error) {
 			MaxRetries:   raw.CI.MaxRetries,
 			PollInterval: ciPollInterval,
 			WaitTimeout:  ciWaitTimeout,
+			AutoMerge:    raw.CI.AutoMerge,
+			MergeMethod:  raw.CI.MergeMethod,
 		},
 		Cleanup: CleanupConfig{
 			Interval:          cleanupInterval,
@@ -207,6 +282,14 @@ func Load(configPath, envPath string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func rawToRepoConfigs(raw []rawRepoConfig) []RepoConfig {
+	out := make([]RepoConfig, len(raw))
+	for i, r := range raw {
+		out[i] = RepoConfig{Name: r.Name, AutoMerge: r.AutoMerge, MergeMethod: r.MergeMethod}
+	}
+	return out
 }
 
 func applyDefaults(raw *rawConfig) {

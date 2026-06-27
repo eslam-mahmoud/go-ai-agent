@@ -11,7 +11,11 @@ labels:
   done: done
 
 repos:
-  - eslam-mahmoud/go-ai-agent
+  - eslam-mahmoud/go-ai-agent          # plain string — inherits global CI settings
+  # Object form enables per-repo overrides:
+  # - name: eslam-mahmoud/eslam.me
+  #   auto_merge: true                  # override global auto_merge for this repo
+  #   merge_method: squash              # merge | squash | rebase
 
 context_dir: .claude-context
 
@@ -27,10 +31,12 @@ claude:
   max_issue_body_chars: 4000  # max chars of issue body in first-run prompt (truncated with marker)
 
 ci:
-  enabled: false       # set true to enable CI/CD feedback loop
-  max_retries: 3       # re-invoke Claude up to N times on CI failure
-  poll_interval: 30s   # how often to check check suite status
-  wait_timeout: 20m    # give up waiting for CI after this long
+  enabled: false        # set true to enable CI/CD feedback loop
+  max_retries: 3        # re-invoke Claude up to N times on CI failure
+  poll_interval: 30s    # how often to check check suite status
+  wait_timeout: 20m     # give up waiting for CI after this long
+  auto_merge: false     # merge PR automatically when CI passes (default: human merges)
+  merge_method: merge   # merge | squash | rebase (global default; overridable per-repo)
 
 cleanup:
   interval: 24h              # how often to run pruning

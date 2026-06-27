@@ -83,7 +83,21 @@ func (l *Loop) finalizeCISuccess(ctx context.Context, owner, repo string, task *
 		return err
 	}
 
-	comment := "✅ **CI passed.** All checks are green."
+	// Auto-merge the PR if configured for this repo.
+	mergeNote := ""
+	if l.cfg.EffectiveAutoMerge(task.Repo) && task.PRNumber > 0 {
+		method := l.cfg.EffectiveMergeMethod(task.Repo)
+		if err := l.gh.MergePullRequest(ctx, owner, repo, task.PRNumber, method); err != nil {
+			l.log.Warn("auto-merge failed — PR left open for manual merge",
+				"pr", task.PRNumber, "method", method, "err", err)
+			mergeNote = fmt.Sprintf("\n\n⚠️ Auto-merge failed: %v. Please merge PR #%d manually.", err, task.PRNumber)
+		} else {
+			l.log.Info("auto-merged PR", "pr", task.PRNumber, "method", method)
+			mergeNote = fmt.Sprintf(" PR #%d merged (%s).", task.PRNumber, method)
+		}
+	}
+
+	comment := "✅ **CI passed.** All checks are green." + mergeNote
 	if _, err := l.gh.PostComment(ctx, owner, repo, task.IssueNumber, comment); err != nil {
 		l.log.Warn("post CI-pass comment failed", "err", err)
 	}
@@ -104,7 +118,7 @@ func (l *Loop) finalizeCISuccess(ctx context.Context, owner, repo string, task *
 
 	issue, err := l.gh.GetIssue(ctx, owner, repo, task.IssueNumber)
 	if err == nil {
-		_ = l.telegram.NotifyCompletion(ctx, issue.HTMLURL, "CI passed — task complete.")
+		_ = l.telegram.NotifyCompletion(ctx, issue.HTMLURL, "CI passed — task complete."+mergeNote)
 	}
 	return nil
 }

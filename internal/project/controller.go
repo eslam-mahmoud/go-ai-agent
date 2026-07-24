@@ -127,6 +127,41 @@ func (controller *Controller) TransitionTask(
 	return controller.Snapshot(projectID)
 }
 
+// TaskStatus and ApplyTaskTransition form the narrow provider-neutral boundary
+// consumed by workflow.FeatureWorkflow.
+func (controller *Controller) TaskStatus(projectID, taskID int64) (domain.TaskStatus, error) {
+	snapshot, err := controller.Snapshot(projectID)
+	if err != nil {
+		return "", err
+	}
+	task := findTask(snapshot.Tasks, taskID)
+	if task == nil {
+		return "", fmt.Errorf("%w: task %d in project %d", ErrTaskNotFound, taskID, projectID)
+	}
+	return task.Status, nil
+}
+
+func (controller *Controller) ApplyTaskTransition(
+	projectID, taskID int64,
+	target domain.TaskStatus,
+	evidence workflow.TaskTransitionEvidence,
+) (domain.TaskStatus, error) {
+	snapshot, err := controller.TransitionTask(projectID, taskID, target, evidence)
+	if err != nil {
+		return "", err
+	}
+	task := findTask(snapshot.Tasks, taskID)
+	if task == nil {
+		return "", fmt.Errorf(
+			"%w: transitioned task %d disappeared from project %d",
+			ErrInconsistentState,
+			taskID,
+			projectID,
+		)
+	}
+	return task.Status, nil
+}
+
 func deriveProjectState(
 	project *domain.Project,
 	task *domain.Task,

@@ -36,6 +36,7 @@ type ReviewStore interface {
 
 type ReviewResult struct {
 	Required    bool
+	Discoveries *DiscoveryDecisionResult
 	AlreadyDone bool
 	Review      *domain.ManagerReview
 	Backlog     *BacklogResult
@@ -51,6 +52,7 @@ type ReviewResult struct {
 type ReviewCoordinator struct {
 	store     ReviewStore
 	runner    ManagerRunner
+	discovery *DiscoveryController
 	backlog   *BacklogController
 	selection *SelectionController
 	publisher *Publisher
@@ -62,6 +64,7 @@ type ReviewCoordinator struct {
 func NewReviewCoordinator(
 	reviewStore ReviewStore,
 	runner ManagerRunner,
+	discovery *DiscoveryController,
 	backlog *BacklogController,
 	selection *SelectionController,
 	publisher *Publisher,
@@ -71,6 +74,8 @@ func NewReviewCoordinator(
 		return nil, errors.New("review coordinator store is required")
 	case runner == nil:
 		return nil, errors.New("review coordinator manager runner is required")
+	case discovery == nil:
+		return nil, errors.New("review coordinator discovery controller is required")
 	case backlog == nil:
 		return nil, errors.New("review coordinator backlog controller is required")
 	case selection == nil:
@@ -79,6 +84,7 @@ func NewReviewCoordinator(
 	return &ReviewCoordinator{
 		store:     reviewStore,
 		runner:    runner,
+		discovery: discovery,
 		backlog:   backlog,
 		selection: selection,
 		publisher: publisher,
@@ -157,6 +163,14 @@ func (coordinator *ReviewCoordinator) applyDecisions(
 	review *domain.ManagerReview,
 	result *ReviewResult,
 ) error {
+	// Discovery verdicts land first: backlog changes may depend on work the
+	// manager just accepted.
+	discoveries, err := coordinator.discovery.ApplyManagerReview(projectID, review.ID)
+	if err != nil {
+		return fmt.Errorf("apply manager discovery decisions: %w", err)
+	}
+	result.Discoveries = discoveries
+
 	backlog, err := coordinator.backlog.ApplyManagerReview(projectID, review.ID)
 	if err != nil {
 		return fmt.Errorf("apply manager backlog changes: %w", err)

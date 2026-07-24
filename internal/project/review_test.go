@@ -254,7 +254,13 @@ func TestReviewCoordinatorRunsWithoutPublisher(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	coordinator, err := NewReviewCoordinator(fixture.store, runner, backlog, selection, nil)
+	discovery, err := NewDiscoveryController(fixture.store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := NewReviewCoordinator(
+		fixture.store, runner, discovery, backlog, selection, nil,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,21 +281,24 @@ func TestNewReviewCoordinatorRequiresCollaborators(t *testing.T) {
 	runner := &fakeManagerRunner{}
 	backlog, _ := NewBacklogController(fixture.store)
 	selection, _ := NewSelectionController(fixture.store)
+	discovery, _ := NewDiscoveryController(fixture.store)
 	cases := []struct {
 		name      string
 		store     ReviewStore
 		runner    ManagerRunner
+		discovery *DiscoveryController
 		backlog   *BacklogController
 		selection *SelectionController
 	}{
-		{"store", nil, runner, backlog, selection},
-		{"runner", fixture.store, nil, backlog, selection},
-		{"backlog", fixture.store, runner, nil, selection},
-		{"selection", fixture.store, runner, backlog, nil},
+		{"store", nil, runner, discovery, backlog, selection},
+		{"runner", fixture.store, nil, discovery, backlog, selection},
+		{"discovery", fixture.store, runner, nil, backlog, selection},
+		{"backlog", fixture.store, runner, discovery, nil, selection},
+		{"selection", fixture.store, runner, discovery, backlog, nil},
 	}
 	for _, test := range cases {
 		if _, err := NewReviewCoordinator(
-			test.store, test.runner, test.backlog, test.selection, nil,
+			test.store, test.runner, test.discovery, test.backlog, test.selection, nil,
 		); err == nil {
 			t.Errorf("missing %s accepted", test.name)
 		}
@@ -420,8 +429,12 @@ func (fixture *reviewFixture) coordinator(
 	if err != nil {
 		t.Fatal(err)
 	}
+	discovery, err := NewDiscoveryController(fixture.store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	coordinator, err := NewReviewCoordinator(
-		fixture.store, runner, backlog, selection, publisher,
+		fixture.store, runner, discovery, backlog, selection, publisher,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -458,4 +471,60 @@ func managerOutputJSON(overrides map[string]any) json.RawMessage {
 		panic(fmt.Sprintf("encode manager output: %v", err))
 	}
 	return raw
+}
+
+// recordDiscoveries persists unevaluated discoveries attributed to the first
+// task, mirroring what extraction produces after an execution.
+func (fixture *reviewFixture) recordDiscoveries(
+	t *testing.T,
+	titles ...string,
+) []*domain.Discovery {
+	t.Helper()
+	batch := make([]*domain.Discovery, 0, len(titles))
+	for _, title := range titles {
+		batch = append(batch, domain.NewDiscovery(
+			fixture.projectID,
+			fixture.tasks[0].ID,
+			0,
+			title,
+			domain.DiscoveryBug,
+			domain.SeverityMedium,
+		))
+	}
+	stored, err := fixture.store.CreateDiscoveries(fixture.projectID, batch, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stored.Created
+}
+
+func (fixture *reviewFixture) review(
+	t *testing.T,
+	decisions []map[string]any,
+) *domain.ManagerReview {
+	t.Helper()
+	if decisions == nil {
+		decisions = []map[string]any{}
+	}
+	raw, err := json.Marshal(decisions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fixture.reviewRaw(t, raw)
+}
+
+func (fixture *reviewFixture) reviewRaw(
+	t *testing.T,
+	raw json.RawMessage,
+) *domain.ManagerReview {
+	t.Helper()
+	review := domain.NewManagerReview(fixture.projectID)
+	review.DiscoveryDecisions = raw
+	review.ReleaseReadiness = "not-ready"
+	review.OwnerUpdate = "Discoveries evaluated."
+	created, err := fixture.store.CreateManagerReview(review)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return created
 }

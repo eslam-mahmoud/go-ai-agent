@@ -55,8 +55,20 @@
           "discovery_id": {"type": "integer", "minimum": 1},
           "decision": {
             "type": "string",
-            "enum": ["accepted", "rejected", "deferred", "architecture-review", "human-approval"]
+            "enum": [
+              "fix-in-current-task",
+              "create-next-task",
+              "create-prioritized-task",
+              "create-release-blocker",
+              "add-to-backlog",
+              "defer",
+              "merge-into-existing-task",
+              "reject-out-of-scope",
+              "request-architecture-review",
+              "request-human-decision"
+            ]
           },
+          "task_id": {"type": ["integer", "null"], "minimum": 1},
           "reason": {"type": "string", "minLength": 1}
         }
       }

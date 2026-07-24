@@ -32,6 +32,7 @@ const (
 	WorkflowTaskSelected         WorkflowEventType = "task.selected"
 	WorkflowProjectPublished     WorkflowEventType = "project.published"
 	WorkflowDiscoveriesRecorded  WorkflowEventType = "discoveries.recorded"
+	WorkflowDiscoveriesDecided   WorkflowEventType = "discoveries.decided"
 )
 
 var ErrInvalidWorkflowEvent = errors.New("invalid workflow event")

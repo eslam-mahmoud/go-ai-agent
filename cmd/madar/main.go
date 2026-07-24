@@ -12,8 +12,9 @@ import (
 	"syscall"
 
 	"github.com/eslam-mahmoud/go-ai-agent/internal/app"
-	"github.com/eslam-mahmoud/go-ai-agent/internal/claude"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/config"
+	"github.com/eslam-mahmoud/go-ai-agent/internal/engine"
+	claudeengine "github.com/eslam-mahmoud/go-ai-agent/internal/engine/claude"
 	githubclient "github.com/eslam-mahmoud/go-ai-agent/internal/github"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/orchestrator"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/store"
@@ -109,10 +110,19 @@ func main() {
 	defer s.Close()
 
 	ghClient := githubclient.New(cfg.GitHub.Token)
-	runner := claude.New(cfg.Claude.Bin)
+	engineRegistry, err := engine.NewRegistry(claudeengine.New(cfg.Claude.Bin))
+	if err != nil {
+		log.Error("failed to initialize engine registry", "err", err)
+		os.Exit(1)
+	}
+	provider, err := engineRegistry.Resolve("claude")
+	if err != nil {
+		log.Error("configured engine is unavailable", "engine", "claude", "err", err)
+		os.Exit(1)
+	}
 	tg := telegram.New(cfg.Telegram.BotToken, cfg.Telegram.AllowedIDs)
 
-	loop := orchestrator.New(cfg, ghClient, runner, tg, s, log)
+	loop := orchestrator.New(cfg, ghClient, provider, tg, s, log)
 	loop.SetCurrentVersion(Version)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)

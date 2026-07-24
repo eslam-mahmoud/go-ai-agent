@@ -2,11 +2,12 @@ package orchestrator
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/eslam-mahmoud/go-ai-agent/internal/engine"
 	githubclient "github.com/eslam-mahmoud/go-ai-agent/internal/github"
-	"github.com/eslam-mahmoud/go-ai-agent/internal/claude"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/store"
 )
 
@@ -33,7 +34,7 @@ func TestCheckCIPending_disabled(t *testing.T) {
 	_ = s.SetCIState("owner/repo", 1, store.CIStateWaiting)
 
 	gh := &fakeGitHubCI{checkStatus: githubclient.CheckSuccess}
-	loop := testLoop(t, gh, &fakeRunner{result: &claude.Result{Output: "ok"}}, &fakeTelegram{}, s)
+	loop := testLoop(t, gh, &fakeRunner{result: &engine.Result{OutputText: "ok"}}, &fakeTelegram{}, s)
 	loop.cfg = cfg
 
 	if err := loop.checkCIPending(context.Background()); err != nil {
@@ -55,7 +56,7 @@ func TestCheckCIPending_stillPending(t *testing.T) {
 	_ = s.SetCIState("owner/repo", 2, store.CIStateWaiting)
 
 	gh := &fakeGitHubCI{checkStatus: githubclient.CheckPending}
-	loop := testLoop(t, gh, &fakeRunner{result: &claude.Result{Output: "ok"}}, &fakeTelegram{}, s)
+	loop := testLoop(t, gh, &fakeRunner{result: &engine.Result{OutputText: "ok"}}, &fakeTelegram{}, s)
 	loop.cfg = cfg
 
 	if err := loop.checkCIPending(context.Background()); err != nil {
@@ -84,7 +85,7 @@ func TestCheckCIPending_passes(t *testing.T) {
 		},
 		checkStatus: githubclient.CheckSuccess,
 	}
-	loop := testLoop(t, gh, &fakeRunner{result: &claude.Result{Output: "ok"}}, tg, s)
+	loop := testLoop(t, gh, &fakeRunner{result: &engine.Result{OutputText: "ok"}}, tg, s)
 	loop.cfg = cfg
 
 	if err := loop.checkCIPending(context.Background()); err != nil {
@@ -111,7 +112,7 @@ func TestCheckCIPending_failsThenFixedAndPasses(t *testing.T) {
 	_ = s.SetCIState("owner/repo", 4, store.CIStateWaiting)
 
 	tg := &fakeTelegram{}
-	// First call: CI failed; Claude fixes it; second call: CI passes.
+	// First call: CI failed; the agent fixes it; second call: CI passes.
 	callCount := 0
 	gh := &fakeGitHubCI{
 		fakeGitHub: fakeGitHub{
@@ -121,11 +122,15 @@ func TestCheckCIPending_failsThenFixedAndPasses(t *testing.T) {
 		},
 	}
 
-	runner := &fakeRunner{result: &claude.Result{Output: "fixed and pushed"}}
+	var captured engine.RunRequest
+	runner := &fakeRunner{
+		result:         &engine.Result{OutputText: "fixed and pushed"},
+		captureOptions: &captured,
+	}
 	loop := testLoop(t, gh, runner, tg, s)
 	loop.cfg = cfg
 
-	// Tick 1: CI fails → Claude re-invoked, ci_state stays waiting.
+	// Tick 1: CI fails → agent re-invoked, ci_state stays waiting.
 	gh.checkStatus = githubclient.CheckFailure
 	gh.failureOutput = "FAIL: TestBar"
 	callCount++
@@ -138,6 +143,16 @@ func TestCheckCIPending_failsThenFixedAndPasses(t *testing.T) {
 	}
 	if task.CIRetries != 1 {
 		t.Errorf("ci_retries = %d, want 1", task.CIRetries)
+	}
+	if len(runner.operations) != 1 || runner.operations[0] != "resume" {
+		t.Errorf("operations = %v, want [resume]", runner.operations)
+	}
+	if captured.ResumeSessionID != "sess-abc" || captured.SessionID != "" {
+		t.Errorf("CI request session fields = session %q resume %q", captured.SessionID, captured.ResumeSessionID)
+	}
+	if !strings.Contains(captured.Prompt, "FAIL: TestBar") ||
+		!strings.Contains(captured.Prompt, "madar/issue-4") {
+		t.Errorf("CI fix prompt = %q", captured.Prompt)
 	}
 
 	// Tick 2: CI now passes → finalize.
@@ -174,7 +189,7 @@ func TestCheckCIPending_exhaustsRetries(t *testing.T) {
 		checkStatus:   githubclient.CheckFailure,
 		failureOutput: "FAIL: still broken",
 	}
-	loop := testLoop(t, gh, &fakeRunner{result: &claude.Result{Output: "ok"}}, tg, s)
+	loop := testLoop(t, gh, &fakeRunner{result: &engine.Result{OutputText: "ok"}}, tg, s)
 	loop.cfg = cfg
 
 	if err := loop.checkCIPending(context.Background()); err != nil {
@@ -215,7 +230,7 @@ func TestCheckCIPending_waitTimeoutExceeded(t *testing.T) {
 		},
 		checkStatus: githubclient.CheckPending, // CI still pending but timeout exceeded
 	}
-	loop := testLoop(t, gh, &fakeRunner{result: &claude.Result{Output: "ok"}}, tg, s)
+	loop := testLoop(t, gh, &fakeRunner{result: &engine.Result{OutputText: "ok"}}, tg, s)
 	loop.cfg = cfg
 
 	if err := loop.checkCIPending(context.Background()); err != nil {
@@ -257,7 +272,7 @@ func TestStartCIWatch(t *testing.T) {
 	s := testStore(t)
 	_, _ = s.UpsertTask("owner/repo", 10, store.StateInProgress, "sess")
 
-	loop := testLoop(t, &fakeGitHubCI{}, &fakeRunner{result: &claude.Result{}}, &fakeTelegram{}, s)
+	loop := testLoop(t, &fakeGitHubCI{}, &fakeRunner{result: &engine.Result{}}, &fakeTelegram{}, s)
 	loop.cfg = testConfig()
 
 	if err := loop.StartCIWatch(context.Background(), "owner/repo", 10, 99); err != nil {

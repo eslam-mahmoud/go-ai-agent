@@ -33,7 +33,7 @@ internal/store/             — SQLite (modernc.org/sqlite, pure Go, no CGO)
 internal/github/            — GitHub API client + check suite polling
 internal/claude/            — v1 compatibility facade and Claude prompt builders
 internal/telegram/          — Telegram Bot API notifications
-internal/orchestrator/      — poll loop, task state machine, CI feedback loop
+internal/orchestrator/      — provider-neutral poll loop, task prompts, CI feedback
 ```
 
 ## Branch & PR Convention

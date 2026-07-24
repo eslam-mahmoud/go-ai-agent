@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eslam-mahmoud/go-ai-agent/internal/claude"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/config"
+	"github.com/eslam-mahmoud/go-ai-agent/internal/engine"
 	githubclient "github.com/eslam-mahmoud/go-ai-agent/internal/github"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/store"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/telegram"
@@ -76,14 +76,45 @@ func (f *fakeGitHub) CreateIssue(_ context.Context, _, _, _, _ string, _ []strin
 func (f *fakeGitHub) CloseIssue(_ context.Context, _, _ string, _ int) error { return nil }
 
 type fakeRunner struct {
-	result         *claude.Result
+	result         *engine.Result
 	err            error
-	capturePrompt  *string // if non-nil, captures the prompt from the last Run call
-	captureOptions *claude.RunOptions
+	capturePrompt  *string
+	captureOptions *engine.RunRequest
 	onRun          func()
+	operations     []string
 }
 
-func (f *fakeRunner) Run(_ context.Context, opts claude.RunOptions) (*claude.Result, error) {
+func (f *fakeRunner) Name() string {
+	return "fake"
+}
+
+func (f *fakeRunner) Capabilities(context.Context) (engine.CapabilitySet, error) {
+	return engine.CapabilitySet{Resume: true, Streaming: true}, nil
+}
+
+func (f *fakeRunner) Run(
+	_ context.Context,
+	request engine.RunRequest,
+	_ func(engine.Event) error,
+) (*engine.Result, error) {
+	f.operations = append(f.operations, "run")
+	return f.execute(request)
+}
+
+func (f *fakeRunner) Resume(
+	_ context.Context,
+	request engine.RunRequest,
+	_ func(engine.Event) error,
+) (*engine.Result, error) {
+	f.operations = append(f.operations, "resume")
+	return f.execute(request)
+}
+
+func (f *fakeRunner) Cancel(context.Context, string) error {
+	return nil
+}
+
+func (f *fakeRunner) execute(opts engine.RunRequest) (*engine.Result, error) {
 	if f.capturePrompt != nil {
 		*f.capturePrompt = opts.Prompt
 	}
@@ -92,6 +123,9 @@ func (f *fakeRunner) Run(_ context.Context, opts claude.RunOptions) (*claude.Res
 	}
 	if f.onRun != nil {
 		f.onRun()
+	}
+	if f.result != nil && f.result.Status == "" {
+		f.result.Status = engine.ResultCompleted
 	}
 	return f.result, f.err
 }
@@ -151,10 +185,10 @@ func testStore(t *testing.T) *store.Store {
 	return s
 }
 
-func testLoop(t *testing.T, gh githubclient.Client, runner claude.Runner, tg telegram.Gateway, s *store.Store) *Loop {
+func testLoop(t *testing.T, gh githubclient.Client, runner engine.Engine, tg telegram.Gateway, s *store.Store) *Loop {
 	t.Helper()
 	cfg := testConfig()
-	// Create the workspace dir so the os.Stat check in runClaude passes.
+	// Create the workspace dir so the os.Stat check in runEngine passes.
 	wsDir := filepath.Join(t.TempDir(), "workspaces", "owner", "repo")
 	if err := os.MkdirAll(wsDir, 0o755); err != nil {
 		t.Fatalf("create workspace dir: %v", err)
@@ -168,7 +202,7 @@ func testLoop(t *testing.T, gh githubclient.Client, runner claude.Runner, tg tel
 
 func TestTick_noReadyIssues(t *testing.T) {
 	gh := &fakeGitHub{}
-	runner := &fakeRunner{result: &claude.Result{Output: "done"}}
+	runner := &fakeRunner{result: &engine.Result{OutputText: "done"}}
 	tg := &fakeTelegram{}
 	s := testStore(t)
 
@@ -189,16 +223,20 @@ func TestTick_claimsAndCompletes(t *testing.T) {
 			{Number: 1, Title: "Fix bug", Body: "details", HTMLURL: "https://github.com/owner/repo/issues/1", Labels: []string{"ready"}},
 		},
 	}
-	runner := &fakeRunner{result: &claude.Result{
-		SessionID: "sess-test",
-		Output:    "Fixed the bug by updating X.",
-		IsError:   false,
-		NumTurns:  3,
-	}}
+	var captured engine.RunRequest
+	runner := &fakeRunner{
+		result: &engine.Result{
+			SessionID:  "sess-test",
+			OutputText: "Fixed the bug by updating X.",
+			Status:     engine.ResultCompleted,
+		},
+		captureOptions: &captured,
+	}
 	tg := &fakeTelegram{}
 	s := testStore(t)
 
 	loop := testLoop(t, gh, runner, tg, s)
+	loop.cfg.Claude.SkipPermissions = true
 	if err := loop.tick(context.Background()); err != nil {
 		t.Fatalf("tick: %v", err)
 	}
@@ -210,6 +248,23 @@ func TestTick_claimsAndCompletes(t *testing.T) {
 	}
 	if task.State != store.StateDone {
 		t.Errorf("task state = %q, want done", task.State)
+	}
+	if task.SessionID != "sess-test" {
+		t.Errorf("persisted session = %q, want sess-test", task.SessionID)
+	}
+	if len(runner.operations) != 1 || runner.operations[0] != "run" {
+		t.Errorf("operations = %v, want [run]", runner.operations)
+	}
+	if captured.SessionID == "" || captured.ResumeSessionID != "" {
+		t.Errorf("first-run session fields = session %q resume %q", captured.SessionID, captured.ResumeSessionID)
+	}
+	if captured.MaxTurns != 40 || captured.Timeout != 30*time.Minute ||
+		!captured.Policy.SkipPermissions {
+		t.Errorf("normalized request = %#v", captured)
+	}
+	if !strings.Contains(captured.Prompt, "Fix bug") ||
+		!strings.Contains(captured.Prompt, "madar/issue-1") {
+		t.Errorf("first-run prompt = %q", captured.Prompt)
 	}
 
 	// Telegram completion should have been called.
@@ -232,11 +287,9 @@ func TestTick_handlesClarification(t *testing.T) {
 			{Number: 2, Title: "Add feature", Body: "vague", HTMLURL: "https://github.com/owner/repo/issues/2", Labels: []string{"ready"}},
 		},
 	}
-	runner := &fakeRunner{result: &claude.Result{
+	runner := &fakeRunner{result: &engine.Result{
 		SessionID:  "sess-clarify",
-		Output:     "NEEDS_CLARIFICATION: Should I use A or B?",
-		NeedsInput: true,
-		Question:   "Should I use A or B?",
+		OutputText: "NEEDS_CLARIFICATION: Should I use A or B?",
 	}}
 	tg := &fakeTelegram{}
 	s := testStore(t)
@@ -261,7 +314,7 @@ func TestTick_handlesClarification(t *testing.T) {
 	}
 }
 
-func TestTick_claudeRunError_transitionsToAwaitingFeedback(t *testing.T) {
+func TestTick_engineRunError_transitionsToAwaitingFeedback(t *testing.T) {
 	gh := &fakeGitHub{
 		issues: []*githubclient.Issue{
 			{Number: 7, Title: "Task", HTMLURL: "url", Labels: []string{"ready"}},
@@ -279,7 +332,7 @@ func TestTick_claudeRunError_transitionsToAwaitingFeedback(t *testing.T) {
 		t.Fatal("task not created")
 	}
 	if task.State != store.StateAwaitingFeedback {
-		t.Errorf("task state = %q after claude error, want awaiting-feedback", task.State)
+		t.Errorf("task state = %q after engine error, want awaiting-feedback", task.State)
 	}
 	if !tg.errorCalled {
 		t.Error("Telegram error notification should have been sent")
@@ -289,13 +342,13 @@ func TestTick_claudeRunError_transitionsToAwaitingFeedback(t *testing.T) {
 	}
 }
 
-func TestTick_claudeResultError_transitionsToAwaitingFeedback(t *testing.T) {
+func TestTick_engineResultError_transitionsToAwaitingFeedback(t *testing.T) {
 	gh := &fakeGitHub{
 		issues: []*githubclient.Issue{
 			{Number: 8, Title: "Task", HTMLURL: "url", Labels: []string{"ready"}},
 		},
 	}
-	runner := &fakeRunner{result: &claude.Result{IsError: true, Output: "something went wrong"}}
+	runner := &fakeRunner{result: &engine.Result{Status: engine.ResultFailed, OutputText: "something went wrong"}}
 	tg := &fakeTelegram{}
 	s := testStore(t)
 
@@ -308,6 +361,76 @@ func TestTick_claudeResultError_transitionsToAwaitingFeedback(t *testing.T) {
 	}
 	if task.State != store.StateAwaitingFeedback {
 		t.Errorf("task state = %q after result error, want awaiting-feedback", task.State)
+	}
+}
+
+func TestTick_invalidResultStatusCannotComplete(t *testing.T) {
+	gh := &fakeGitHub{
+		issues: []*githubclient.Issue{
+			{Number: 81, Title: "Task", HTMLURL: "url", Labels: []string{"ready"}},
+		},
+	}
+	runner := &fakeRunner{result: &engine.Result{
+		Status:     engine.ResultStatus("unexpected"),
+		OutputText: "looks complete",
+	}}
+	tg := &fakeTelegram{}
+	s := testStore(t)
+
+	loop := testLoop(t, gh, runner, tg, s)
+	_ = loop.tick(context.Background())
+
+	task, _ := s.GetTask("owner/repo", 81)
+	if task == nil || task.State != store.StateAwaitingFeedback {
+		t.Errorf("task = %#v, want awaiting-feedback", task)
+	}
+	if tg.completionCalled {
+		t.Error("invalid result status announced completion")
+	}
+}
+
+func TestTick_nilResultCannotComplete(t *testing.T) {
+	gh := &fakeGitHub{
+		issues: []*githubclient.Issue{
+			{Number: 83, Title: "Task", HTMLURL: "url", Labels: []string{"ready"}},
+		},
+	}
+	tg := &fakeTelegram{}
+	s := testStore(t)
+
+	loop := testLoop(t, gh, &fakeRunner{}, tg, s)
+	_ = loop.tick(context.Background())
+
+	task, _ := s.GetTask("owner/repo", 83)
+	if task == nil || task.State != store.StateAwaitingFeedback {
+		t.Errorf("task = %#v, want awaiting-feedback", task)
+	}
+	if tg.completionCalled {
+		t.Error("nil result announced completion")
+	}
+}
+
+func TestTick_cancelledResultTransitionsToInterrupted(t *testing.T) {
+	gh := &fakeGitHub{
+		issues: []*githubclient.Issue{
+			{Number: 82, Title: "Task", HTMLURL: "url", Labels: []string{"ready"}},
+		},
+	}
+	runner := &fakeRunner{result: &engine.Result{Status: engine.ResultCancelled}}
+	tg := &fakeTelegram{}
+	s := testStore(t)
+
+	loop := testLoop(t, gh, runner, tg, s)
+	if err := loop.tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+
+	task, _ := s.GetTask("owner/repo", 82)
+	if task == nil || task.State != store.StateInterrupted {
+		t.Errorf("task = %#v, want interrupted", task)
+	}
+	if gh.postedComment != "" || tg.clarificationCalled || tg.completionCalled {
+		t.Error("cancelled result notified completion or clarification")
 	}
 }
 
@@ -361,9 +484,9 @@ func TestRecoverInterruptedResumesStoredSession(t *testing.T) {
 	s := testStore(t)
 	_, _ = s.UpsertTask("owner/repo", 42, store.StateInProgress, "session-42")
 
-	var captured claude.RunOptions
+	var captured engine.RunRequest
 	runner := &fakeRunner{
-		result:         &claude.Result{Output: "recovered and completed"},
+		result:         &engine.Result{OutputText: "recovered and completed"},
 		captureOptions: &captured,
 		onRun: func() {
 			task, err := s.GetTask("owner/repo", 42)
@@ -382,11 +505,14 @@ func TestRecoverInterruptedResumesStoredSession(t *testing.T) {
 		t.Fatalf("recoverInterrupted: %v", err)
 	}
 
-	if captured.ResumeID != "session-42" {
-		t.Errorf("ResumeID = %q, want session-42", captured.ResumeID)
+	if captured.ResumeSessionID != "session-42" {
+		t.Errorf("ResumeSessionID = %q, want session-42", captured.ResumeSessionID)
 	}
 	if captured.SessionID != "" {
 		t.Errorf("SessionID = %q, want empty for resume", captured.SessionID)
+	}
+	if len(runner.operations) != 1 || runner.operations[0] != "resume" {
+		t.Errorf("operations = %v, want [resume]", runner.operations)
 	}
 	if !containsStr(captured.Prompt, "interrupted") {
 		t.Errorf("recovery prompt = %q, want interruption context", captured.Prompt)
@@ -412,7 +538,7 @@ func TestRecoverInterruptedDoesNotResumeCIWaitingTask(t *testing.T) {
 	_ = s.SetCIState("owner/repo", 43, store.CIStateWaiting)
 	runnerCalls := 0
 	runner := &fakeRunner{
-		result: &claude.Result{Output: "unexpected"},
+		result: &engine.Result{OutputText: "unexpected"},
 		onRun:  func() { runnerCalls++ },
 	}
 	loop := testLoop(t, &fakeGitHub{}, runner, &fakeTelegram{}, s)
@@ -437,7 +563,7 @@ func TestTick_missingWorkspace_skipsIssue(t *testing.T) {
 	}
 	tg := &fakeTelegram{}
 	s := testStore(t)
-	loop := testLoop(t, gh, &fakeRunner{result: &claude.Result{Output: "ok"}}, tg, s)
+	loop := testLoop(t, gh, &fakeRunner{result: &engine.Result{OutputText: "ok"}}, tg, s)
 	// Remove the workspace dir so EnsureWorkspaces will attempt (and fail) to clone.
 	// This simulates a missing workspace for a repo that can't be auto-cloned.
 	wsDir := filepath.Join(loop.cfg.WorkspaceDir, "owner", "repo")
@@ -464,7 +590,7 @@ func TestTick_ciAndFeedbackRunBeforeCountActive(t *testing.T) {
 			{Body: "Use per-IP", Author: "human", CreatedAt: clarTime.Add(time.Minute)},
 		},
 	}
-	runner := &fakeRunner{result: &claude.Result{Output: "done"}}
+	runner := &fakeRunner{result: &engine.Result{OutputText: "done"}}
 	tg := &fakeTelegram{}
 	s := testStore(t)
 
@@ -497,7 +623,7 @@ func TestTick_capacityGuard(t *testing.T) {
 			{Number: 3, Title: "Task", HTMLURL: "url", Labels: []string{"ready"}},
 		},
 	}
-	runner := &fakeRunner{result: &claude.Result{Output: "done"}}
+	runner := &fakeRunner{result: &engine.Result{OutputText: "done"}}
 	tg := &fakeTelegram{}
 	s := testStore(t)
 
@@ -525,7 +651,7 @@ func TestResumeIfReplied_collectsAllHumanReplies(t *testing.T) {
 		},
 	}
 	var capturedPrompt string
-	runner := &fakeRunner{result: &claude.Result{Output: "done"}, capturePrompt: &capturedPrompt}
+	runner := &fakeRunner{result: &engine.Result{OutputText: "done"}, capturePrompt: &capturedPrompt}
 	tg := &fakeTelegram{}
 	s := testStore(t)
 
@@ -556,7 +682,7 @@ func TestResumeIfReplied_skipsBotCommentByUsername(t *testing.T) {
 			{Body: "Human answer here", Author: "human-user", CreatedAt: clarTime.Add(2 * time.Minute)},
 		},
 	}
-	runner := &fakeRunner{result: &claude.Result{Output: "done"}}
+	runner := &fakeRunner{result: &engine.Result{OutputText: "done"}}
 	tg := &fakeTelegram{}
 	s := testStore(t)
 
@@ -592,10 +718,9 @@ func TestCheckAwaitingFeedback_resumes(t *testing.T) {
 			},
 		},
 	}
-	runner := &fakeRunner{result: &claude.Result{
-		Output:   "Implemented per-IP rate limiting at 5/min.",
-		IsError:  false,
-		NumTurns: 2,
+	runner := &fakeRunner{result: &engine.Result{
+		OutputText: "Implemented per-IP rate limiting at 5/min.",
+		Status:     engine.ResultCompleted,
 	}}
 	tg := &fakeTelegram{}
 	s := testStore(t)

@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -37,6 +38,8 @@ type Task struct {
 	Repo                string
 	IssueNumber         int
 	SessionID           string
+	Engine              string
+	Model               string
 	State               TaskState
 	LastClarificationAt *time.Time
 	PRNumber            int
@@ -46,6 +49,16 @@ type Task struct {
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
 }
+
+// ExecutionBinding identifies the provider context assigned to a legacy task
+// execution. The v2 executions table will supersede this compatibility record.
+type ExecutionBinding struct {
+	Engine            string
+	Model             string
+	ProviderSessionID string
+}
+
+var ErrExecutionBindingConflict = errors.New("execution binding conflict")
 
 type Store struct {
 	db *sql.DB
@@ -142,6 +155,12 @@ var migrations = []struct {
 		CREATE INDEX IF NOT EXISTS idx_tasks_ci_state ON tasks(ci_state);
 		CREATE INDEX IF NOT EXISTS idx_audit_created  ON audit_log(created_at);
 	`},
+	// v3: pin the provider and model used by the legacy task execution. The
+	// existing session_id column remains the provider session for compatibility.
+	{3, `
+		ALTER TABLE tasks ADD COLUMN engine TEXT NOT NULL DEFAULT '';
+		ALTER TABLE tasks ADD COLUMN model TEXT NOT NULL DEFAULT '';
+	`},
 }
 
 func (s *Store) migrate() error {
@@ -167,13 +186,22 @@ func (s *Store) migrate() error {
 		if m.version <= current {
 			continue
 		}
-		if _, err := s.db.Exec(m.sql); err != nil {
+		tx, err := s.db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin migration v%d: %w", m.version, err)
+		}
+		if _, err := tx.Exec(m.sql); err != nil {
+			_ = tx.Rollback()
 			return fmt.Errorf("migration v%d: %w", m.version, err)
 		}
-		if _, err := s.db.Exec(
+		if _, err := tx.Exec(
 			`INSERT INTO schema_migrations (version) VALUES (?)`, m.version,
 		); err != nil {
+			_ = tx.Rollback()
 			return fmt.Errorf("record migration v%d: %w", m.version, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit migration v%d: %w", m.version, err)
 		}
 	}
 	return nil
@@ -204,18 +232,97 @@ func (s *Store) UpsertTask(repo string, issueNumber int, state TaskState, sessio
 
 func (s *Store) GetTask(repo string, issueNumber int) (*Task, error) {
 	row := s.db.QueryRow(`
-		SELECT id, repo, issue_number, session_id, state, last_clarification_at,
+		SELECT id, repo, issue_number, session_id, engine, model, state, last_clarification_at,
 		       pr_number, ci_state, ci_retries, ci_watch_started_at, created_at, updated_at
 		FROM tasks WHERE repo = ? AND issue_number = ?
 	`, repo, issueNumber)
 	return scanTask(row)
 }
 
+// BindTaskExecution atomically creates or binds a legacy task to one provider
+// execution context. Existing non-empty bindings cannot be changed implicitly.
+// A pre-migration task with a provider session but no engine is bound lazily
+// without replacing that session.
+func (s *Store) BindTaskExecution(
+	repo string,
+	issueNumber int,
+	state TaskState,
+	binding ExecutionBinding,
+) (*Task, error) {
+	if binding.Engine == "" {
+		return nil, fmt.Errorf("bind task execution: engine is required")
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin task execution binding: %w", err)
+	}
+	defer tx.Rollback()
+
+	var currentEngine, currentModel, currentSession string
+	err = tx.QueryRow(`
+		SELECT engine, model, session_id
+		FROM tasks
+		WHERE repo = ? AND issue_number = ?
+	`, repo, issueNumber).Scan(&currentEngine, &currentModel, &currentSession)
+	switch {
+	case err == sql.ErrNoRows:
+		now := time.Now().UTC()
+		if _, err := tx.Exec(`
+			INSERT INTO tasks (
+				repo, issue_number, state, session_id, engine, model, created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`, repo, issueNumber, string(state), binding.ProviderSessionID, binding.Engine, binding.Model, now, now); err != nil {
+			return nil, fmt.Errorf("insert task execution binding: %w", err)
+		}
+	case err != nil:
+		return nil, fmt.Errorf("read task execution binding: %w", err)
+	default:
+		if currentEngine != "" &&
+			(currentEngine != binding.Engine || currentModel != binding.Model) {
+			return nil, fmt.Errorf(
+				"%w: stored engine/model %q/%q, requested %q/%q",
+				ErrExecutionBindingConflict,
+				currentEngine,
+				currentModel,
+				binding.Engine,
+				binding.Model,
+			)
+		}
+		sessionID := currentSession
+		if sessionID == "" {
+			sessionID = binding.ProviderSessionID
+		}
+		if _, err := tx.Exec(`
+			UPDATE tasks
+			SET state = ?, session_id = ?, engine = ?, model = ?, updated_at = ?
+			WHERE repo = ? AND issue_number = ?
+		`, string(state), sessionID, binding.Engine, binding.Model, time.Now().UTC(), repo, issueNumber); err != nil {
+			return nil, fmt.Errorf("update task execution binding: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit task execution binding: %w", err)
+	}
+	return s.GetTask(repo, issueNumber)
+}
+
 func (s *Store) SetSessionID(repo string, issueNumber int, sessionID string) error {
-	_, err := s.db.Exec(`
+	result, err := s.db.Exec(`
 		UPDATE tasks SET session_id = ?, updated_at = ? WHERE repo = ? AND issue_number = ?
 	`, sessionID, time.Now().UTC(), repo, issueNumber)
-	return err
+	if err != nil {
+		return fmt.Errorf("set provider session ID: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read provider session update count: %w", err)
+	}
+	if updated != 1 {
+		return fmt.Errorf("set provider session ID: task %s#%d not found", repo, issueNumber)
+	}
+	return nil
 }
 
 func (s *Store) SetClarificationTime(repo string, issueNumber int, t time.Time) error {
@@ -262,7 +369,7 @@ func (s *Store) IncrementCIRetries(repo string, issueNumber int) (int, error) {
 
 func (s *Store) ListByState(state TaskState) ([]*Task, error) {
 	rows, err := s.db.Query(`
-		SELECT id, repo, issue_number, session_id, state, last_clarification_at,
+		SELECT id, repo, issue_number, session_id, engine, model, state, last_clarification_at,
 		       pr_number, ci_state, ci_retries, ci_watch_started_at, created_at, updated_at
 		FROM tasks WHERE state = ? ORDER BY created_at ASC
 	`, string(state))
@@ -284,7 +391,7 @@ func (s *Store) ListByState(state TaskState) ([]*Task, error) {
 
 func (s *Store) ListByCIState(ciState CIState) ([]*Task, error) {
 	rows, err := s.db.Query(`
-		SELECT id, repo, issue_number, session_id, state, last_clarification_at,
+		SELECT id, repo, issue_number, session_id, engine, model, state, last_clarification_at,
 		       pr_number, ci_state, ci_retries, ci_watch_started_at, created_at, updated_at
 		FROM tasks WHERE ci_state = ? ORDER BY created_at ASC
 	`, string(ciState))
@@ -366,12 +473,12 @@ func (s *Store) MarkActiveTasksInterrupted() (int64, error) {
 	return int64(len(tasks)), nil
 }
 
-// CountActive returns the number of tasks Claude is actively executing.
+// CountActive returns the number of tasks with an active provider execution.
 // Excluded from the count:
-//   - awaiting-feedback: parked, waiting for human input, Claude is idle
-//   - in-progress with ci_state=waiting: Claude finished, only CI polling remains
+//   - awaiting-feedback: parked, waiting for human input, the provider is idle
+//   - in-progress with ci_state=waiting: the provider finished, only CI polling remains
 //
-// Only tasks where Claude is genuinely running (in-progress, not CI-watching)
+// Only tasks where a provider is genuinely running (in-progress, not CI-watching)
 // count toward the max_parallel ceiling.
 func (s *Store) CountActive() (int, error) {
 	var count int
@@ -452,7 +559,7 @@ func scanTask(s scanner) (*Task, error) {
 	var state, ciState string
 	var clarAt, ciWatchAt sql.NullTime
 	if err := s.Scan(
-		&t.ID, &t.Repo, &t.IssueNumber, &t.SessionID, &state, &clarAt,
+		&t.ID, &t.Repo, &t.IssueNumber, &t.SessionID, &t.Engine, &t.Model, &state, &clarAt,
 		&t.PRNumber, &ciState, &t.CIRetries, &ciWatchAt, &t.CreatedAt, &t.UpdatedAt,
 	); err != nil {
 		if err == sql.ErrNoRows {

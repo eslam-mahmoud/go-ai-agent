@@ -21,6 +21,7 @@ context_dir: .claude-context
 
 claude:
   bin: ""                     # path to claude CLI binary; defaults to "claude" on PATH
+  model: ""                   # optional model; empty keeps the provider default
   output_format: stream-json  # always paired with --verbose
   max_turns: 40               # caps agentic turns per invocation
   run_timeout: 30m            # external wrapper; Claude Code has no built-in cap

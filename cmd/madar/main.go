@@ -115,14 +115,22 @@ func main() {
 		log.Error("failed to initialize engine registry", "err", err)
 		os.Exit(1)
 	}
-	provider, err := engineRegistry.Resolve("claude")
-	if err != nil {
-		log.Error("configured engine is unavailable", "engine", "claude", "err", err)
-		os.Exit(1)
-	}
 	tg := telegram.New(cfg.Telegram.BotToken, cfg.Telegram.AllowedIDs)
 
-	loop := orchestrator.New(cfg, ghClient, provider, tg, s, log)
+	loop, err := orchestrator.New(
+		cfg,
+		ghClient,
+		engineRegistry,
+		"claude",
+		cfg.Claude.Model,
+		tg,
+		s,
+		log,
+	)
+	if err != nil {
+		log.Error("failed to initialize orchestrator", "err", err)
+		os.Exit(1)
+	}
 	loop.SetCurrentVersion(Version)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -206,27 +214,60 @@ func printStatus(s *store.Store, cfg *config.Config) {
 	fmt.Printf("  schema version : %d\n", v)
 	fmt.Printf("  db             : %s\n", cfg.DBPath)
 	fmt.Printf("  repos          : %v\n", cfg.RepoNames())
-	fmt.Printf("  active (claude): %d\n", active)
+	fmt.Printf("  active runs    : %d\n", active)
 	fmt.Printf("  in-progress    : %d\n", len(inProgress))
 	for _, t := range inProgress {
-		fmt.Printf("    #%d %s (session %s)\n", t.IssueNumber, t.Repo, t.SessionID)
+		printTaskExecution(t)
 	}
 	fmt.Printf("  interrupted   : %d\n", len(interrupted))
 	for _, t := range interrupted {
-		fmt.Printf("    #%d %s (session %s)\n", t.IssueNumber, t.Repo, t.SessionID)
+		printTaskExecution(t)
 	}
 	fmt.Printf("  recovering    : %d\n", len(recovering))
 	for _, t := range recovering {
-		fmt.Printf("    #%d %s (session %s)\n", t.IssueNumber, t.Repo, t.SessionID)
+		printTaskExecution(t)
 	}
 	fmt.Printf("  awaiting-feedback: %d\n", len(waiting))
 	for _, t := range waiting {
-		fmt.Printf("    #%d %s\n", t.IssueNumber, t.Repo)
+		printTaskExecution(t)
 	}
 	fmt.Printf("  ci-watching    : %d\n", len(ciWaiting))
 	for _, t := range ciWaiting {
-		fmt.Printf("    #%d %s (pr=%d)\n", t.IssueNumber, t.Repo, t.PRNumber)
+		fmt.Printf(
+			"    #%d %s (engine %s, model %s, session %s, pr %d)\n",
+			t.IssueNumber,
+			t.Repo,
+			displayEngine(t.Engine),
+			displayModel(t.Model),
+			t.SessionID,
+			t.PRNumber,
+		)
 	}
+}
+
+func printTaskExecution(t *store.Task) {
+	fmt.Printf(
+		"    #%d %s (engine %s, model %s, session %s)\n",
+		t.IssueNumber,
+		t.Repo,
+		displayEngine(t.Engine),
+		displayModel(t.Model),
+		t.SessionID,
+	)
+}
+
+func displayEngine(name string) string {
+	if name == "" {
+		return "legacy-unbound"
+	}
+	return name
+}
+
+func displayModel(name string) string {
+	if name == "" {
+		return "provider-default"
+	}
+	return name
 }
 
 func newLogger(level string) *slog.Logger {

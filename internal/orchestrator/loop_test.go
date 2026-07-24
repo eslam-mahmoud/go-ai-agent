@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -76,6 +77,7 @@ func (f *fakeGitHub) CreateIssue(_ context.Context, _, _, _, _ string, _ []strin
 func (f *fakeGitHub) CloseIssue(_ context.Context, _, _ string, _ int) error { return nil }
 
 type fakeRunner struct {
+	name           string
 	result         *engine.Result
 	err            error
 	capturePrompt  *string
@@ -85,6 +87,9 @@ type fakeRunner struct {
 }
 
 func (f *fakeRunner) Name() string {
+	if f.name != "" {
+		return f.name
+	}
 	return "fake"
 }
 
@@ -195,10 +200,38 @@ func testLoop(t *testing.T, gh githubclient.Client, runner engine.Engine, tg tel
 	}
 	cfg.WorkspaceDir = filepath.Join(filepath.Dir(filepath.Dir(wsDir)))
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	return New(cfg, gh, runner, tg, s, log)
+	registry, err := engine.NewRegistry(runner)
+	if err != nil {
+		t.Fatalf("engine.NewRegistry: %v", err)
+	}
+	loop, err := New(cfg, gh, registry, runner.Name(), cfg.Claude.Model, tg, s, log)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return loop
 }
 
 // --- tests ---
+
+func TestNewRejectsUnavailableDefaultEngine(t *testing.T) {
+	registry, err := engine.NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = New(
+		testConfig(),
+		&fakeGitHub{},
+		registry,
+		"missing",
+		"",
+		&fakeTelegram{},
+		testStore(t),
+		slog.Default(),
+	)
+	if !errors.Is(err, engine.ErrEngineNotFound) {
+		t.Errorf("New error = %v", err)
+	}
+}
 
 func TestTick_noReadyIssues(t *testing.T) {
 	gh := &fakeGitHub{}
@@ -224,6 +257,7 @@ func TestTick_claimsAndCompletes(t *testing.T) {
 		},
 	}
 	var captured engine.RunRequest
+	s := testStore(t)
 	runner := &fakeRunner{
 		result: &engine.Result{
 			SessionID:  "sess-test",
@@ -231,11 +265,22 @@ func TestTick_claimsAndCompletes(t *testing.T) {
 			Status:     engine.ResultCompleted,
 		},
 		captureOptions: &captured,
+		onRun: func() {
+			task, err := s.GetTask("owner/repo", 1)
+			if err != nil {
+				t.Errorf("GetTask during provider run: %v", err)
+				return
+			}
+			if task == nil || task.Engine != "fake" || task.Model != "sonnet" ||
+				task.SessionID == "" || task.SessionID == "sess-test" {
+				t.Errorf("binding before provider launch = %#v", task)
+			}
+		},
 	}
 	tg := &fakeTelegram{}
-	s := testStore(t)
 
 	loop := testLoop(t, gh, runner, tg, s)
+	loop.defaultModel = "sonnet"
 	loop.cfg.Claude.SkipPermissions = true
 	if err := loop.tick(context.Background()); err != nil {
 		t.Fatalf("tick: %v", err)
@@ -252,13 +297,17 @@ func TestTick_claimsAndCompletes(t *testing.T) {
 	if task.SessionID != "sess-test" {
 		t.Errorf("persisted session = %q, want sess-test", task.SessionID)
 	}
+	if task.Engine != "fake" || task.Model != "sonnet" {
+		t.Errorf("persisted engine/model = %q/%q", task.Engine, task.Model)
+	}
 	if len(runner.operations) != 1 || runner.operations[0] != "run" {
 		t.Errorf("operations = %v, want [run]", runner.operations)
 	}
 	if captured.SessionID == "" || captured.ResumeSessionID != "" {
 		t.Errorf("first-run session fields = session %q resume %q", captured.SessionID, captured.ResumeSessionID)
 	}
-	if captured.MaxTurns != 40 || captured.Timeout != 30*time.Minute ||
+	if captured.ExecutionID != task.ID || captured.Model != "sonnet" ||
+		captured.MaxTurns != 40 || captured.Timeout != 30*time.Minute ||
 		!captured.Policy.SkipPermissions {
 		t.Errorf("normalized request = %#v", captured)
 	}
@@ -555,6 +604,80 @@ func TestRecoverInterruptedDoesNotResumeCIWaitingTask(t *testing.T) {
 	}
 }
 
+func TestRecoverInterruptedUsesPinnedModelAfterDefaultChanges(t *testing.T) {
+	gh := &fakeGitHub{issues: []*githubclient.Issue{{
+		Number:  44,
+		Title:   "Pinned execution",
+		HTMLURL: "https://github.com/owner/repo/issues/44",
+		Labels:  []string{"in-progress"},
+	}}}
+	s := testStore(t)
+	if _, err := s.BindTaskExecution("owner/repo", 44, store.StateInProgress, store.ExecutionBinding{
+		Engine:            "alternate",
+		Model:             "pinned-model",
+		ProviderSessionID: "session-44",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var captured engine.RunRequest
+	defaultRunner := &fakeRunner{result: &engine.Result{OutputText: "must not run"}}
+	runner := &fakeRunner{
+		name:           "alternate",
+		result:         &engine.Result{OutputText: "recovered"},
+		captureOptions: &captured,
+	}
+	loop := testLoop(t, gh, defaultRunner, &fakeTelegram{}, s)
+	if err := loop.engines.Register(runner); err != nil {
+		t.Fatal(err)
+	}
+	loop.defaultModel = "new-default"
+
+	if err := loop.recoverInterrupted(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if captured.Model != "pinned-model" || captured.ResumeSessionID != "session-44" {
+		t.Errorf("resume request = %#v", captured)
+	}
+	if len(defaultRunner.operations) != 0 || len(runner.operations) != 1 ||
+		runner.operations[0] != "resume" {
+		t.Errorf("default operations=%v alternate operations=%v", defaultRunner.operations, runner.operations)
+	}
+}
+
+func TestRecoverInterruptedUnavailableStoredEngineDoesNotFallback(t *testing.T) {
+	gh := &fakeGitHub{issues: []*githubclient.Issue{{
+		Number:  45,
+		Title:   "Missing provider",
+		HTMLURL: "https://github.com/owner/repo/issues/45",
+		Labels:  []string{"in-progress"},
+	}}}
+	s := testStore(t)
+	if _, err := s.BindTaskExecution("owner/repo", 45, store.StateInProgress, store.ExecutionBinding{
+		Engine:            "unavailable",
+		Model:             "pinned-model",
+		ProviderSessionID: "session-45",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{result: &engine.Result{OutputText: "must not run"}}
+	tg := &fakeTelegram{}
+	loop := testLoop(t, gh, runner, tg, s)
+
+	if err := loop.recoverInterrupted(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.operations) != 0 {
+		t.Errorf("fallback provider operations = %v", runner.operations)
+	}
+	task, _ := s.GetTask("owner/repo", 45)
+	if task.State != store.StateAwaitingFeedback || task.Engine != "unavailable" {
+		t.Errorf("blocked task = %#v", task)
+	}
+	if !tg.clarificationCalled || !strings.Contains(gh.postedComment, "stored engine is unavailable") {
+		t.Errorf("missing-provider clarification = %q, notified=%v", gh.postedComment, tg.clarificationCalled)
+	}
+}
+
 func TestTick_missingWorkspace_skipsIssue(t *testing.T) {
 	gh := &fakeGitHub{
 		issues: []*githubclient.Issue{
@@ -651,14 +774,26 @@ func TestResumeIfReplied_collectsAllHumanReplies(t *testing.T) {
 		},
 	}
 	var capturedPrompt string
-	runner := &fakeRunner{result: &engine.Result{OutputText: "done"}, capturePrompt: &capturedPrompt}
+	var capturedRequest engine.RunRequest
+	runner := &fakeRunner{
+		result:         &engine.Result{OutputText: "done"},
+		capturePrompt:  &capturedPrompt,
+		captureOptions: &capturedRequest,
+	}
 	tg := &fakeTelegram{}
 	s := testStore(t)
 
-	_, _ = s.UpsertTask("owner/repo", 55, store.StateAwaitingFeedback, "sess-55")
+	if _, err := s.BindTaskExecution("owner/repo", 55, store.StateAwaitingFeedback, store.ExecutionBinding{
+		Engine:            "fake",
+		Model:             "pinned-feedback-model",
+		ProviderSessionID: "sess-55",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	_ = s.SetClarificationTime("owner/repo", 55, clarTime)
 
 	loop := testLoop(t, gh, runner, tg, s)
+	loop.defaultModel = "changed-default"
 	loop.botUsername = "madar-bot"
 
 	if err := loop.checkAwaitingFeedback(context.Background()); err != nil {
@@ -670,6 +805,10 @@ func TestResumeIfReplied_collectsAllHumanReplies(t *testing.T) {
 	}
 	if !containsStr(capturedPrompt, "Correction to first answer") {
 		t.Error("resume prompt should contain second reply")
+	}
+	if capturedRequest.Model != "pinned-feedback-model" ||
+		capturedRequest.ResumeSessionID != "sess-55" {
+		t.Errorf("feedback resume request = %#v", capturedRequest)
 	}
 }
 

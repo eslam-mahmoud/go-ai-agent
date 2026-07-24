@@ -108,7 +108,13 @@ func TestCheckCIPending_failsThenFixedAndPasses(t *testing.T) {
 	cfg.CI.Enabled = true
 	cfg.CI.MaxRetries = 3
 	s := testStore(t)
-	_, _ = s.UpsertTask("owner/repo", 4, store.StateInProgress, "sess-abc")
+	if _, err := s.BindTaskExecution("owner/repo", 4, store.StateInProgress, store.ExecutionBinding{
+		Engine:            "fake",
+		Model:             "pinned-ci-model",
+		ProviderSessionID: "sess-abc",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	_ = s.SetCIState("owner/repo", 4, store.CIStateWaiting)
 
 	tg := &fakeTelegram{}
@@ -129,6 +135,7 @@ func TestCheckCIPending_failsThenFixedAndPasses(t *testing.T) {
 	}
 	loop := testLoop(t, gh, runner, tg, s)
 	loop.cfg = cfg
+	loop.defaultModel = "changed-default"
 
 	// Tick 1: CI fails → agent re-invoked, ci_state stays waiting.
 	gh.checkStatus = githubclient.CheckFailure
@@ -149,6 +156,12 @@ func TestCheckCIPending_failsThenFixedAndPasses(t *testing.T) {
 	}
 	if captured.ResumeSessionID != "sess-abc" || captured.SessionID != "" {
 		t.Errorf("CI request session fields = session %q resume %q", captured.SessionID, captured.ResumeSessionID)
+	}
+	if captured.Model != "pinned-ci-model" {
+		t.Errorf("CI request model = %q, want pinned-ci-model", captured.Model)
+	}
+	if captured.ExecutionID != task.ID {
+		t.Errorf("CI request execution ID = %d, want %d", captured.ExecutionID, task.ID)
 	}
 	if !strings.Contains(captured.Prompt, "FAIL: TestBar") ||
 		!strings.Contains(captured.Prompt, "madar/issue-4") {

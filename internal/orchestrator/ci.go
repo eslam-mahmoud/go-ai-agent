@@ -165,10 +165,18 @@ func (l *Loop) handleCIFailure(ctx context.Context, owner, repo string, task *st
 	// Resume the provider session with the failure details.
 	prompt := BuildCIFixPrompt(failureOutput, branch, task.PRNumber, retries, l.cfg.CI.MaxRetries)
 	workDir := filepath.Join(l.cfg.WorkspaceDir, owner, repo)
+	boundTask, provider, err := l.resolveTaskEngine(task)
+	if err != nil {
+		_ = l.store.Log(task.Repo, task.IssueNumber, "engine_unavailable", err.Error())
+		return fmt.Errorf("resolve provider for CI repair: %w", err)
+	}
+	task = boundTask
 	request := engine.RunRequest{
+		ExecutionID:     task.ID,
 		WorkDir:         workDir,
 		ResumeSessionID: task.SessionID,
 		Prompt:          prompt,
+		Model:           task.Model,
 		MaxTurns:        l.cfg.Claude.MaxTurns,
 		Timeout:         l.cfg.Claude.RunTimeout,
 		Policy: engine.Policy{
@@ -176,7 +184,7 @@ func (l *Loop) handleCIFailure(ctx context.Context, owner, repo string, task *st
 		},
 	}
 
-	result, err := l.engine.Resume(ctx, request, nil)
+	result, err := provider.Resume(ctx, request, nil)
 	if err != nil {
 		return fmt.Errorf("provider CI fix run: %w", err)
 	}

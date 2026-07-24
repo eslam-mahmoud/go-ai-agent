@@ -491,7 +491,8 @@ madar project create \
   --name "Project name" \
   --goal "Ship the next release" \
   --scope "In-scope behavior and constraints" \
-  --release-target v2.0.0
+  --release-target v2.0.0 \
+  --parent-issue 123
 
 # Inspect registered projects and one project's complete state.
 madar project list
@@ -509,11 +510,19 @@ madar project list-tasks --repo owner/repository
 
 # Materialize the durable snapshot in the configured repository workspace.
 madar project sync-files --repo owner/repository
+
+# Create or update the human-facing GitHub dashboard issue.
+GITHUB_TOKEN=github_pat_... madar project sync-issue --repo owner/repository
 ```
 
 The sync command atomically writes `.madar/project.yaml` and
 `.madar/plan.md`. Equal database state produces byte-identical files; the
 generated files contain no wall-clock generation timestamp.
+
+`sync-issue` creates a parent issue when the project has no linked issue, or
+updates the linked issue otherwise. Madar owns only the content between the
+hidden `madar:project-dashboard` markers; text outside those markers is
+preserved exactly.
 
 ---
 

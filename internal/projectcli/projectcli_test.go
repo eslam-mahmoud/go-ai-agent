@@ -2,6 +2,7 @@ package projectcli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -10,7 +11,9 @@ import (
 	"testing"
 
 	"github.com/eslam-mahmoud/go-ai-agent/internal/domain"
+	githubclient "github.com/eslam-mahmoud/go-ai-agent/internal/github"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/projectfiles"
+	"github.com/eslam-mahmoud/go-ai-agent/internal/projectissue"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/store"
 )
 
@@ -26,6 +29,7 @@ func TestCreateListAndShowProject(t *testing.T) {
 		"--goal", " Ship v2 ",
 		"--scope", " Sequential delivery ",
 		"--release-target", " v2.0.0 ",
+		"--parent-issue", "123",
 	), &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("create: %v\nstderr: %s", err, stderr.String())
@@ -47,6 +51,7 @@ func TestCreateListAndShowProject(t *testing.T) {
 		project.Goal != "Ship v2" ||
 		project.Scope != "Sequential delivery" ||
 		project.ReleaseTarget != "v2.0.0" ||
+		project.ParentIssueNumber != 123 ||
 		project.State != domain.ProjectInitializing ||
 		project.Health != domain.HealthOnTrack {
 		t.Fatalf("created project = %#v", project)
@@ -355,6 +360,100 @@ func TestSyncFilesRejectsMissingWorkspace(t *testing.T) {
 	}
 }
 
+func TestSyncIssueCreatesLinksAndUpdatesDashboard(t *testing.T) {
+	configPath, dbPath := writeTestConfig(t)
+	mustRun(t, configPath,
+		"create",
+		"--repo", "owner/repo",
+		"--name", "Madar",
+		"--goal", "Ship v2",
+	)
+	t.Setenv("GITHUB_TOKEN", "test-token")
+
+	client := &cliIssueClient{}
+	factoryCalls := 0
+	factory := func(token string) projectissue.Client {
+		factoryCalls++
+		if token != "test-token" {
+			t.Errorf("factory token = %q", token)
+		}
+		return client
+	}
+	args := withConfig(configPath, "sync-issue", "--repo", "owner/repo")[1:]
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := runSyncIssue(args, &stdout, &stderr, factory); err != nil {
+		t.Fatalf("create issue: %v\nstderr: %s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "created parent project issue #90") ||
+		client.createCalls != 1 {
+		t.Fatalf("create output = %q, calls=%d", stdout.String(), client.createCalls)
+	}
+
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := s.GetProjectByRepo("owner/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if project.ParentIssueNumber != 90 {
+		t.Fatalf("parent issue = %d, want 90", project.ParentIssueNumber)
+	}
+
+	client.existingBody = "Human notes\n\n" + client.createdBody + "\n\nHuman footer"
+	stdout.Reset()
+	stderr.Reset()
+	if err := runSyncIssue(args, &stdout, &stderr, factory); err != nil {
+		t.Fatalf("update issue: %v\nstderr: %s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "updated parent project issue #90") ||
+		client.updateCalls != 1 ||
+		!strings.HasPrefix(client.updatedBody, "Human notes\n\n") ||
+		!strings.HasSuffix(client.updatedBody, "\n\nHuman footer") {
+		t.Fatalf(
+			"update output=%q calls=%d body=%q",
+			stdout.String(),
+			client.updateCalls,
+			client.updatedBody,
+		)
+	}
+	if factoryCalls != 2 {
+		t.Errorf("factory calls = %d, want 2", factoryCalls)
+	}
+}
+
+func TestSyncIssueRequiresGitHubToken(t *testing.T) {
+	configPath, _ := writeTestConfig(t)
+	mustRun(t, configPath,
+		"create",
+		"--repo", "owner/repo",
+		"--name", "Madar",
+		"--goal", "Ship v2",
+	)
+	t.Setenv("GITHUB_TOKEN", "")
+	factoryCalled := false
+	err := runSyncIssue(
+		withConfig(configPath, "sync-issue", "--repo", "owner/repo")[1:],
+		&bytes.Buffer{},
+		&bytes.Buffer{},
+		func(string) projectissue.Client {
+			factoryCalled = true
+			return &cliIssueClient{}
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "GITHUB_TOKEN is required") {
+		t.Fatalf("error = %v", err)
+	}
+	if factoryCalled {
+		t.Fatal("GitHub client was created without credentials")
+	}
+}
+
 func TestProjectHelp(t *testing.T) {
 	var stdout bytes.Buffer
 	if err := Run([]string{"help"}, &stdout, &bytes.Buffer{}); err != nil {
@@ -367,11 +466,62 @@ func TestProjectHelp(t *testing.T) {
 		"project add-task",
 		"project list-tasks",
 		"project sync-files",
+		"project sync-issue",
 	} {
 		if !strings.Contains(stdout.String(), command) {
 			t.Errorf("help output missing %q:\n%s", command, stdout.String())
 		}
 	}
+}
+
+type cliIssueClient struct {
+	createCalls  int
+	updateCalls  int
+	createdBody  string
+	existingBody string
+	updatedBody  string
+}
+
+func (c *cliIssueClient) GetIssue(
+	context.Context,
+	string,
+	string,
+	int,
+) (*githubclient.Issue, error) {
+	return &githubclient.Issue{
+		Number: 90,
+		Body:   c.existingBody,
+	}, nil
+}
+
+func (c *cliIssueClient) CreateIssue(
+	_ context.Context,
+	_, _, _ string,
+	body string,
+	_ []string,
+) (*githubclient.Issue, error) {
+	c.createCalls++
+	c.createdBody = body
+	return &githubclient.Issue{
+		Number:  90,
+		Body:    body,
+		HTMLURL: "https://github.com/owner/repo/issues/90",
+	}, nil
+}
+
+func (c *cliIssueClient) UpdateIssueBody(
+	_ context.Context,
+	_, _ string,
+	number int,
+	body string,
+) (*githubclient.Issue, error) {
+	c.updateCalls++
+	c.updatedBody = body
+	return &githubclient.Issue{
+		Number:  number,
+		Body:    body,
+		HTMLURL: "https://github.com/owner/repo/issues/90",
+	}, nil
 }
 
 func writeSyncTestConfig(t *testing.T) (string, string) {

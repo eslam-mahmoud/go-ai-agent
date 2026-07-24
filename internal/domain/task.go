@@ -84,6 +84,24 @@ func (status TaskStatus) Valid() bool {
 	}
 }
 
+// Active reports whether a task owns Madar's single delivery lane.
+func (status TaskStatus) Active() bool {
+	switch status {
+	case TaskSelected,
+		TaskPlanning,
+		TaskWaitingInput,
+		TaskDeveloping,
+		TaskReviewing,
+		TaskFixing,
+		TaskVerifying,
+		TaskWaitingCI,
+		TaskBlocked:
+		return true
+	default:
+		return false
+	}
+}
+
 // Validate checks record invariants, not lifecycle transitions.
 func (task *Task) Validate() error {
 	if task == nil {

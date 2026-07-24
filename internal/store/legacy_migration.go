@@ -349,7 +349,10 @@ func findOrCreateMigratedTask(
 		legacy.UpdatedAt.UTC(),
 	)
 	if err != nil {
-		return nil, false, fmt.Errorf("create migrated project task: %w", err)
+		return nil, false, fmt.Errorf(
+			"create migrated project task: %w",
+			classifyActiveTaskConstraint(err),
+		)
 	}
 	id, err := result.LastInsertId()
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/eslam-mahmoud/go-ai-agent/internal/domain"
@@ -14,6 +15,7 @@ var (
 	ErrProjectTaskPositionTaken = errors.New("project task position is occupied")
 	ErrProjectTaskNotFound      = errors.New("project task not found")
 	ErrInvalidProjectTaskOrder  = errors.New("invalid project task order")
+	ErrActiveProjectTaskExists  = errors.New("an active project task already exists")
 )
 
 // CreateProjectTask persists a task. Sequence zero atomically appends it to
@@ -95,7 +97,7 @@ func (s *Store) CreateProjectTask(task *domain.Task) (*domain.Task, error) {
 		now,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("insert project task: %w", err)
+		return nil, fmt.Errorf("insert project task: %w", classifyActiveTaskConstraint(err))
 	}
 	id, err := result.LastInsertId()
 	if err != nil {
@@ -223,7 +225,7 @@ func (s *Store) UpdateProjectTask(task *domain.Task) (*domain.Task, error) {
 		task.ProjectID,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("update project task: %w", err)
+		return nil, fmt.Errorf("update project task: %w", classifyActiveTaskConstraint(err))
 	}
 	updated, err := result.RowsAffected()
 	if err != nil {
@@ -239,6 +241,16 @@ func (s *Store) UpdateProjectTask(task *domain.Task) (*domain.Task, error) {
 		return nil, fmt.Errorf("commit update project task: %w", err)
 	}
 	return s.GetProjectTaskByID(task.ID)
+}
+
+func classifyActiveTaskConstraint(err error) error {
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(err.Error(), "idx_project_tasks_single_active") {
+		return fmt.Errorf("%w: %v", ErrActiveProjectTaskExists, err)
+	}
+	return err
 }
 
 // ListProjectTasks returns the project's backlog in sequence order.

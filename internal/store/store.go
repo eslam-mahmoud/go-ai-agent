@@ -600,6 +600,48 @@ var migrations = []struct {
 		END
 		WHERE state = 'paused';
 	`},
+	// v12: immutable, project-scoped workflow audit facts. A per-project
+	// sequence supports stable incremental reads and deterministic replay.
+	{12, `
+		CREATE TABLE workflow_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			task_id INTEGER REFERENCES project_tasks(id) ON DELETE SET NULL,
+			execution_id INTEGER REFERENCES executions(id) ON DELETE SET NULL,
+			sequence INTEGER NOT NULL CHECK (sequence > 0),
+			source TEXT NOT NULL CHECK (
+				source IN ('controller', 'workflow', 'recovery', 'engine', 'external')
+			),
+			event_type TEXT NOT NULL CHECK (length(trim(event_type)) > 0),
+			message TEXT NOT NULL DEFAULT '',
+			data_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(data_json)),
+			idempotency_key TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL,
+			UNIQUE(project_id, sequence)
+		);
+		CREATE UNIQUE INDEX idx_workflow_events_idempotency
+			ON workflow_events(project_id, idempotency_key)
+			WHERE idempotency_key <> '';
+		CREATE INDEX idx_workflow_events_task
+			ON workflow_events(project_id, task_id, sequence);
+		CREATE INDEX idx_workflow_events_execution
+			ON workflow_events(execution_id, sequence);
+
+		CREATE TRIGGER workflow_events_owner_insert
+		BEFORE INSERT ON workflow_events
+		BEGIN
+			SELECT CASE WHEN NEW.task_id IS NOT NULL AND NOT EXISTS (
+				SELECT 1 FROM project_tasks
+				WHERE id = NEW.task_id AND project_id = NEW.project_id
+			) THEN RAISE(ABORT, 'workflow event task must belong to project') END;
+			SELECT CASE WHEN NEW.execution_id IS NOT NULL AND NOT EXISTS (
+				SELECT 1 FROM executions
+				WHERE id = NEW.execution_id
+				AND project_id = NEW.project_id
+				AND (NEW.task_id IS NULL OR task_id = NEW.task_id)
+			) THEN RAISE(ABORT, 'workflow event execution must belong to project and task') END;
+		END;
+	`},
 }
 
 func (s *Store) migrate() error {

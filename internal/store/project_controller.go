@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -28,6 +29,7 @@ type ProjectTaskTransitionUpdate struct {
 	ProjectState   domain.ProjectState
 	SetCurrentTask bool
 	CurrentTaskID  *int64
+	Evidence       json.RawMessage
 }
 
 // LoadProjectAggregate returns one transactionally consistent project
@@ -105,6 +107,9 @@ func (s *Store) ApplyProjectTaskTransition(
 		update.CurrentTaskID != nil &&
 		*update.CurrentTaskID != update.TaskID {
 		return fmt.Errorf("%w: current task must be the transitioned task", domain.ErrInvalidProject)
+	}
+	if len(update.Evidence) > 0 && !json.Valid(update.Evidence) {
+		return fmt.Errorf("%w: transition evidence must be valid JSON", domain.ErrInvalidTask)
 	}
 
 	tx, err := s.db.Begin()
@@ -188,6 +193,30 @@ func (s *Store) ApplyProjectTaskTransition(
 		return fmt.Errorf("read transitioned project count: %w", err)
 	} else if changed != 1 {
 		return fmt.Errorf("%w: ID %d", ErrProjectNotFound, update.ProjectID)
+	}
+	taskID := update.TaskID
+	var evidence any
+	if len(update.Evidence) > 0 {
+		evidence = json.RawMessage(update.Evidence)
+	}
+	if err := appendWorkflowFactTx(
+		tx,
+		update.ProjectID,
+		&taskID,
+		nil,
+		domain.WorkflowSourceController,
+		domain.WorkflowTaskTransitioned,
+		fmt.Sprintf("Task transitioned from %s to %s.", update.ExpectedStatus, update.NewStatus),
+		map[string]any{
+			"from":            update.ExpectedStatus,
+			"to":              update.NewStatus,
+			"project_state":   update.ProjectState,
+			"current_task_id": update.CurrentTaskID,
+			"evidence":        evidence,
+		},
+		"",
+	); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit project task transition: %w", err)

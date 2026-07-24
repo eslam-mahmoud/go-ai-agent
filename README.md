@@ -483,9 +483,14 @@ sudo journalctl -fu madar   # follow logs
 │   └── madar/
 │       └── main.go              # Binary entrypoint
 ├── internal/
+│   ├── app/
+│   │   └── lock.go              # Single-daemon lifecycle lock
 │   ├── config/
 │   │   ├── config.go            # Config loading (YAML + .env)
 │   │   └── config_test.go
+│   ├── engine/
+│   │   ├── engine.go            # Provider-neutral execution contract
+│   │   └── errors.go            # Stable provider error taxonomy
 │   ├── store/
 │   │   ├── store.go             # SQLite task/session store
 │   │   └── store_test.go

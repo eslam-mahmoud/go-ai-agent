@@ -25,7 +25,9 @@ interfaces — see `loop_test.go` for the pattern.
 
 ```
 cmd/madar/main.go           — entrypoint, wires all packages together
+internal/app/               — daemon lifecycle primitives (instance lock)
 internal/config/            — YAML + .env loading
+internal/engine/            — provider-neutral contracts and error taxonomy
 internal/store/             — SQLite (modernc.org/sqlite, pure Go, no CGO)
 internal/github/            — GitHub API client + check suite polling
 internal/claude/            — claude CLI wrapper, stream-json parser, prompts

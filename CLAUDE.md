@@ -28,9 +28,10 @@ cmd/madar/main.go           — entrypoint, wires all packages together
 internal/app/               — daemon lifecycle primitives (instance lock)
 internal/config/            — YAML + .env loading
 internal/engine/            — provider-neutral contracts and error taxonomy
+internal/engine/claude/     — Claude CLI adapter, stream parser, normalized events
 internal/store/             — SQLite (modernc.org/sqlite, pure Go, no CGO)
 internal/github/            — GitHub API client + check suite polling
-internal/claude/            — claude CLI wrapper, stream-json parser, prompts
+internal/claude/            — v1 compatibility facade and Claude prompt builders
 internal/telegram/          — Telegram Bot API notifications
 internal/orchestrator/      — poll loop, task state machine, CI feedback loop
 ```

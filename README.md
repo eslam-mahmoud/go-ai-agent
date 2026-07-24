@@ -154,6 +154,24 @@ ready ──▶ in-progress ──▶ done
           in-progress ──▶ done
 ```
 
+The v2 project workflow uses one validated task transition graph:
+
+```text
+proposed → queued → selected → planning → developing → reviewing
+                        ↘ waiting-input ↗              ↓       ↑
+                                                     fixing ───┘
+                                                       ↓
+                                                   verifying → waiting-ci → completed
+                                                       ↑            │
+                                                       └── fixing ←─┘
+```
+
+Non-terminal work may move to `blocked`, `cancelled`, or `deferred` where
+allowed. Resumption and progress edges require explicit durable evidence such
+as a manager review, completed plan, supplied input, review findings,
+verification results, CI results, blocker resolution, or reprioritization.
+`completed` and `cancelled` are terminal.
+
 Public state is expressed through GitHub Issue labels. SQLite additionally
 uses `interrupted` and `recovering` while restarting an unfinished provider
 execution; the issue keeps its `in-progress` label throughout recovery. The

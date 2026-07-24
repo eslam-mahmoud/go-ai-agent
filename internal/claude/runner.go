@@ -123,9 +123,6 @@ func (r *cliRunner) Run(ctx context.Context, opts RunOptions) (*Result, error) {
 	}()
 
 	result, parseErr := parseStream(stdout)
-	if parseErr != nil {
-		_ = cmd.Process.Kill()
-	}
 	stderrErr := <-stderrDone
 	waitErr := cmd.Wait()
 	stderrText := sanitizeStderr(stderrCapture.String(), stderrCapture.truncated)
@@ -137,11 +134,11 @@ func (r *cliRunner) Run(ctx context.Context, opts RunOptions) (*Result, error) {
 			stderrText,
 		)
 	}
-	if parseErr != nil {
-		return nil, withStderr("parse claude stream", parseErr, stderrText)
-	}
 	if waitErr != nil {
 		return nil, withStderr("claude process failed", waitErr, stderrText)
+	}
+	if parseErr != nil {
+		return nil, withStderr("parse claude stream", parseErr, stderrText)
 	}
 	if stderrErr != nil {
 		return nil, fmt.Errorf("read claude stderr: %w", stderrErr)
@@ -220,6 +217,7 @@ func buildArgs(opts RunOptions) []string {
 func parseStream(r io.Reader) (*Result, error) {
 	result := &Result{}
 	var assistantTexts []string
+	sawTerminalResult := false
 
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
@@ -247,6 +245,7 @@ func parseStream(r io.Reader) (*Result, error) {
 				}
 			}
 		case "result":
+			sawTerminalResult = true
 			result.IsError = event.IsError
 			result.NumTurns = event.NumTurns
 			if event.SessionID != "" {
@@ -256,12 +255,19 @@ func parseStream(r io.Reader) (*Result, error) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		_, _ = io.Copy(io.Discard, r)
 		return nil, err
+	}
+	if !sawTerminalResult {
+		return nil, fmt.Errorf("claude stream ended without terminal result event")
 	}
 
 	// If output is empty, build it from assistant texts
 	if result.Output == "" && len(assistantTexts) > 0 {
 		result.Output = strings.Join(assistantTexts, "\n")
+	}
+	if !result.IsError && strings.TrimSpace(result.Output) == "" {
+		return nil, fmt.Errorf("claude returned an empty successful result")
 	}
 
 	// Detect clarification request

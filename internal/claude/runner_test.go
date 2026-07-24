@@ -157,6 +157,54 @@ func TestParseStream_errorResult(t *testing.T) {
 	}
 }
 
+func TestParseStream_missingTerminalResult(t *testing.T) {
+	jsonStream := `
+{"type":"system","subtype":"init","session_id":"sess-incomplete"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Partial work before the provider stopped."}]}}
+`
+	result, err := parseStream(strings.NewReader(jsonStream))
+	if err == nil {
+		t.Fatal("parseStream returned nil error without a terminal result event")
+	}
+	if result != nil {
+		t.Errorf("parseStream result = %#v, want nil for incomplete stream", result)
+	}
+	if !strings.Contains(err.Error(), "terminal result") {
+		t.Errorf("error %q does not identify missing terminal result", err)
+	}
+}
+
+func TestParseStream_emptySuccessfulResult(t *testing.T) {
+	jsonStream := `
+{"type":"system","subtype":"init","session_id":"sess-empty"}
+{"type":"result","subtype":"success","is_error":false,"result":"","session_id":"sess-empty","num_turns":1}
+`
+	result, err := parseStream(strings.NewReader(jsonStream))
+	if err == nil {
+		t.Fatal("parseStream returned nil error for empty successful result")
+	}
+	if result != nil {
+		t.Errorf("parseStream result = %#v, want nil for empty successful result", result)
+	}
+	if !strings.Contains(err.Error(), "empty successful") {
+		t.Errorf("error %q does not identify empty successful output", err)
+	}
+}
+
+func TestParseStream_emptyErrorResultRemainsAnErrorResult(t *testing.T) {
+	jsonStream := `
+{"type":"system","subtype":"init","session_id":"sess-error"}
+{"type":"result","subtype":"error","is_error":true,"result":"","session_id":"sess-error","num_turns":1}
+`
+	result, err := parseStream(strings.NewReader(jsonStream))
+	if err != nil {
+		t.Fatalf("parseStream returned error for explicit provider error result: %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Errorf("parseStream result = %#v, want IsError result", result)
+	}
+}
+
 func TestParseStream_emptyOutput_usesAssistantText(t *testing.T) {
 	// When result event has empty "result" field, use accumulated assistant texts
 	jsonStream := `
@@ -259,6 +307,48 @@ func TestCLIRunner_zeroExitWithResultSucceeds(t *testing.T) {
 	}
 	if result.Output != "completed" {
 		t.Errorf("Output = %q, want completed", result.Output)
+	}
+}
+
+func TestCLIRunner_rejectsZeroExitWithoutTerminalResult(t *testing.T) {
+	bin := writeFakeClaude(t,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"partial output"}]}}`,
+		"",
+		0,
+	)
+
+	result, err := New(bin).Run(context.Background(), RunOptions{
+		WorkDir: t.TempDir(),
+		Prompt:  "test",
+		Timeout: 5 * time.Second,
+	})
+	if err == nil {
+		t.Fatal("Run returned nil error without a terminal result event")
+	}
+	if result != nil {
+		t.Errorf("Run result = %#v, want nil for incomplete stream", result)
+	}
+	if !strings.Contains(err.Error(), "terminal result") {
+		t.Errorf("error %q does not identify missing terminal result", err)
+	}
+}
+
+func TestCLIRunner_rejectsZeroExitWithoutOutput(t *testing.T) {
+	bin := writeFakeClaude(t, "", "", 0)
+
+	result, err := New(bin).Run(context.Background(), RunOptions{
+		WorkDir: t.TempDir(),
+		Prompt:  "test",
+		Timeout: 5 * time.Second,
+	})
+	if err == nil {
+		t.Fatal("Run returned nil error for empty zero-exit invocation")
+	}
+	if result != nil {
+		t.Errorf("Run result = %#v, want nil for empty invocation", result)
+	}
+	if !strings.Contains(err.Error(), "terminal result") {
+		t.Errorf("error %q does not identify missing terminal result", err)
 	}
 }
 

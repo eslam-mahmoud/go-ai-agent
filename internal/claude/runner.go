@@ -1,23 +1,15 @@
 package claude
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"os"
-	"os/exec"
-	"strings"
 	"time"
-	"unicode"
 
 	"github.com/eslam-mahmoud/go-ai-agent/internal/engine"
+	claudeengine "github.com/eslam-mahmoud/go-ai-agent/internal/engine/claude"
 )
 
-// Result is the outcome of a claude invocation.
+// Result is the legacy outcome consumed by the v1 orchestrator.
 type Result struct {
 	SessionID string
 	Output    string
@@ -49,409 +41,61 @@ type Runner interface {
 	Run(ctx context.Context, opts RunOptions) (*Result, error)
 }
 
-type cliRunner struct {
-	claudeBin string
+type engineRunner struct {
+	provider engine.Engine
 }
-
-const maxStderrBytes = 8 * 1024
 
 func New(claudeBin string) Runner {
-	if claudeBin == "" {
-		claudeBin = "claude"
-	}
-	return &cliRunner{claudeBin: claudeBin}
+	return &engineRunner{provider: claudeengine.New(claudeBin)}
 }
 
-// streamEvent represents one line of stream-json output from claude.
-type streamEvent struct {
-	Type    string `json:"type"`
-	Subtype string `json:"subtype"`
-
-	// system/init
-	SessionID string `json:"session_id"`
-
-	// assistant message
-	Message *assistantMessage `json:"message"`
-
-	// result
-	IsError  bool   `json:"is_error"`
-	Result   string `json:"result"`
-	NumTurns int    `json:"num_turns"`
-	Usage    *usage `json:"usage"`
-}
-
-type assistantMessage struct {
-	Content []contentBlock `json:"content"`
-}
-
-type contentBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}
-
-type usage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
-}
-
-func (r *cliRunner) Run(ctx context.Context, opts RunOptions) (*Result, error) {
-	args := buildArgs(opts)
-
-	cmdCtx := ctx
-	var cancel context.CancelFunc
-	if opts.Timeout > 0 {
-		cmdCtx, cancel = context.WithTimeout(ctx, opts.Timeout)
-		defer cancel()
+func (r *engineRunner) Run(ctx context.Context, opts RunOptions) (*Result, error) {
+	request := engine.RunRequest{
+		WorkDir:         opts.WorkDir,
+		Prompt:          opts.Prompt,
+		SessionID:       opts.SessionID,
+		ResumeSessionID: opts.ResumeID,
+		Timeout:         opts.Timeout,
+		MaxTurns:        opts.MaxTurns,
+		Policy: engine.Policy{
+			SkipPermissions: opts.SkipPermissions,
+		},
 	}
 
-	if err := validateWorkDir(opts.WorkDir); err != nil {
-		return nil, engine.NewExecutionError(
-			engine.ErrorWorkspaceInvalid,
-			"claude",
-			"validate-workspace",
-			err,
-		)
-	}
-	if err := cmdCtx.Err(); err != nil {
-		return nil, contextExecutionError("start", err, "")
-	}
-
-	cmd := exec.CommandContext(cmdCtx, r.claudeBin, args...)
-	cmd.Dir = opts.WorkDir
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, engine.NewExecutionError(
-			engine.ErrorUnknown,
-			"claude",
-			"open-stdout",
-			fmt.Errorf("stdout pipe: %w", err),
-		)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, engine.NewExecutionError(
-			engine.ErrorUnknown,
-			"claude",
-			"open-stderr",
-			fmt.Errorf("stderr pipe: %w", err),
-		)
-	}
-	if err := cmd.Start(); err != nil {
-		if ctxErr := cmdCtx.Err(); ctxErr != nil {
-			return nil, contextExecutionError("start", ctxErr, "")
+	numTurns := 0
+	captureTerminalMetadata := func(event engine.Event) error {
+		if event.Type != engine.EventCompleted && event.Type != engine.EventFailed {
+			return nil
 		}
-		return nil, engine.NewExecutionError(
-			engine.ErrorProviderUnavailable,
-			"claude",
-			"start",
-			fmt.Errorf("start claude: %w", err),
-		)
-	}
-
-	stderrCapture := &limitedBuffer{limit: maxStderrBytes}
-	stderrDone := make(chan error, 1)
-	go func() {
-		_, copyErr := io.Copy(stderrCapture, stderr)
-		stderrDone <- copyErr
-	}()
-
-	result, parseErr := parseStream(stdout)
-	stderrErr := <-stderrDone
-	waitErr := cmd.Wait()
-	stderrText := sanitizeStderr(stderrCapture.String(), stderrCapture.truncated)
-
-	if waitErr != nil && errors.Is(cmdCtx.Err(), context.DeadlineExceeded) {
-		return nil, engine.NewExecutionError(
-			engine.ErrorTimeout,
-			"claude",
-			"run",
-			withStderr(
-				fmt.Sprintf("claude timed out after %s", opts.Timeout),
-				context.DeadlineExceeded,
-				stderrText,
-			),
-		)
-	}
-	if waitErr != nil && errors.Is(cmdCtx.Err(), context.Canceled) {
-		return nil, contextExecutionError("run", context.Canceled, stderrText)
-	}
-	if waitErr != nil {
-		return nil, engine.NewExecutionError(
-			engine.ErrorProcessExit,
-			"claude",
-			"run",
-			withStderr("claude process failed", waitErr, stderrText),
-		)
-	}
-	if parseErr != nil {
-		return nil, engine.NewExecutionError(
-			engine.ErrorInvalidOutput,
-			"claude",
-			"parse-output",
-			withStderr("parse claude stream", parseErr, stderrText),
-		)
-	}
-	if stderrErr != nil {
-		return nil, engine.NewExecutionError(
-			engine.ErrorUnknown,
-			"claude",
-			"read-stderr",
-			fmt.Errorf("read claude stderr: %w", stderrErr),
-		)
-	}
-
-	return result, nil
-}
-
-func validateWorkDir(workDir string) error {
-	if workDir == "" {
+		var terminal struct {
+			NumTurns int `json:"num_turns"`
+		}
+		if json.Unmarshal(event.Data, &terminal) == nil {
+			numTurns = terminal.NumTurns
+		}
 		return nil
 	}
-	info, err := os.Stat(workDir)
-	if err != nil {
-		return fmt.Errorf("validate work directory %q: %w", workDir, err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("validate work directory %q: not a directory", workDir)
-	}
-	return nil
-}
 
-func contextExecutionError(operation string, cause error, stderr string) error {
-	class := engine.ErrorCancelled
-	message := "claude execution cancelled"
-	if errors.Is(cause, context.DeadlineExceeded) {
-		class = engine.ErrorTimeout
-		message = "claude execution timed out"
-	}
-	return engine.NewExecutionError(
-		class,
-		"claude",
-		operation,
-		withStderr(message, cause, stderr),
+	var (
+		normalized *engine.Result
+		err        error
 	)
-}
-
-type limitedBuffer struct {
-	buf       bytes.Buffer
-	limit     int
-	truncated bool
-}
-
-func (b *limitedBuffer) Write(p []byte) (int, error) {
-	originalLen := len(p)
-	remaining := b.limit - b.buf.Len()
-	if remaining <= 0 {
-		b.truncated = b.truncated || originalLen > 0
-		return originalLen, nil
-	}
-	if len(p) > remaining {
-		p = p[:remaining]
-		b.truncated = true
-	}
-	_, _ = b.buf.Write(p)
-	return originalLen, nil
-}
-
-func (b *limitedBuffer) String() string {
-	return b.buf.String()
-}
-
-func sanitizeStderr(stderr string, truncated bool) string {
-	stderr = strings.ToValidUTF8(stderr, "\uFFFD")
-	stderr = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
-			return ' '
-		}
-		return r
-	}, stderr)
-	stderr = strings.Join(strings.Fields(stderr), " ")
-	if truncated {
-		stderr = strings.TrimSpace(stderr + " [truncated]")
-	}
-	return stderr
-}
-
-func withStderr(message string, cause error, stderr string) error {
-	if stderr == "" {
-		return fmt.Errorf("%s: %w", message, cause)
-	}
-	return fmt.Errorf("%s: %w; stderr: %s", message, cause, stderr)
-}
-
-func buildArgs(opts RunOptions) []string {
-	args := []string{
-		"-p", opts.Prompt,
-		"--output-format", "stream-json",
-		"--verbose",
-	}
 	if opts.ResumeID != "" {
-		args = append(args, "--resume", opts.ResumeID)
-	} else if opts.SessionID != "" {
-		args = append(args, "--session-id", opts.SessionID)
+		normalized, err = r.provider.Resume(ctx, request, captureTerminalMetadata)
+	} else {
+		normalized, err = r.provider.Run(ctx, request, captureTerminalMetadata)
 	}
-	if opts.MaxTurns > 0 {
-		args = append(args, "--max-turns", fmt.Sprintf("%d", opts.MaxTurns))
-	}
-	if opts.SkipPermissions {
-		args = append(args, "--dangerously-skip-permissions")
-	}
-	return args
-}
-
-func parseStream(r io.Reader) (*Result, error) {
-	result := &Result{}
-	var assistantTexts []string
-	sawTerminalResult := false
-
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		var event streamEvent
-		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			continue // skip unparseable lines
-		}
-
-		switch event.Type {
-		case "system":
-			if event.Subtype == "init" && event.SessionID != "" {
-				result.SessionID = event.SessionID
-			}
-		case "assistant":
-			if event.Message != nil {
-				for _, block := range event.Message.Content {
-					if block.Type == "text" && block.Text != "" {
-						assistantTexts = append(assistantTexts, block.Text)
-					}
-				}
-			}
-		case "result":
-			sawTerminalResult = true
-			result.IsError = event.IsError
-			result.NumTurns = event.NumTurns
-			if event.SessionID != "" {
-				result.SessionID = event.SessionID
-			}
-			result.Output = event.Result
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		_, _ = io.Copy(io.Discard, r)
+	if err != nil {
 		return nil, err
 	}
-	if !sawTerminalResult {
-		return nil, fmt.Errorf("claude stream ended without terminal result event")
-	}
 
-	// If output is empty, build it from assistant texts
-	if result.Output == "" && len(assistantTexts) > 0 {
-		result.Output = strings.Join(assistantTexts, "\n")
-	}
-	if !result.IsError && strings.TrimSpace(result.Output) == "" {
-		return nil, fmt.Errorf("claude returned an empty successful result")
-	}
-
-	// Detect clarification request
-	result.NeedsInput, result.Question = detectClarification(result.Output)
-
-	return result, nil
-}
-
-// detectClarification checks whether the output contains a clarification request.
-// Claude is prompted to start with "NEEDS_CLARIFICATION:" when it requires human input.
-const clarificationPrefix = "NEEDS_CLARIFICATION:"
-
-func detectClarification(output string) (bool, string) {
-	trimmed := strings.TrimSpace(output)
-	// Check explicit prefix first
-	if strings.HasPrefix(trimmed, clarificationPrefix) {
-		question := strings.TrimSpace(trimmed[len(clarificationPrefix):])
-		return true, question
-	}
-	return false, ""
-}
-
-// BuildFirstRunPrompt creates the prompt for the first invocation of a task.
-// issueNumber derives the required branch name; maxBodyChars truncates the
-// issue body if it exceeds the limit (0 = no limit).
-func BuildFirstRunPrompt(issueTitle, issueBody, threadComments string, issueNumber, maxBodyChars int) string {
-	branch := fmt.Sprintf("madar/issue-%d", issueNumber)
-	var sb strings.Builder
-	sb.WriteString("You are working on the following GitHub Issue task. Complete the task fully and autonomously.\n\n")
-	sb.WriteString("IMPORTANT RULES:\n")
-	sb.WriteString(fmt.Sprintf("1. Create a branch named exactly `%s` for all your changes.\n", branch))
-	sb.WriteString("2. Commit your changes to that branch and push it.\n")
-	sb.WriteString("3. Open a pull request from that branch and include 'PR: #<number>' (e.g. 'PR: #42') on its own line in your final response so the CI watcher can track it.\n")
-	sb.WriteString("4. If you need clarification before proceeding, respond with exactly:\n")
-	sb.WriteString("   NEEDS_CLARIFICATION: <your question here>\n\n")
-	sb.WriteString("Otherwise, complete the task and summarize what you did.\n\n")
-	sb.WriteString("---\n")
-	sb.WriteString("Title: ")
-	sb.WriteString(issueTitle)
-	sb.WriteString("\n\n")
-	if issueBody != "" {
-		body := issueBody
-		if maxBodyChars > 0 && len(body) > maxBodyChars {
-			body = body[:maxBodyChars] + "\n[truncated — see issue for full description]"
-		}
-		sb.WriteString("Description:\n")
-		sb.WriteString(body)
-		sb.WriteString("\n\n")
-	}
-	if threadComments != "" {
-		sb.WriteString("Issue thread:\n")
-		sb.WriteString(threadComments)
-		sb.WriteString("\n")
-	}
-	return sb.String()
-}
-
-// ReplyEntry is a single human comment used in a resume prompt.
-type ReplyEntry struct {
-	Author    string
-	Body      string
-	Timestamp string // RFC3339
-}
-
-// BuildResumePrompt creates the prompt for resuming after one or more human replies.
-// Each entry is formatted with author and timestamp so Claude has full attribution.
-func BuildResumePrompt(replies []ReplyEntry) string {
-	var sb strings.Builder
-	if len(replies) == 1 {
-		sb.WriteString("Maintainer replied:\n\n")
-	} else {
-		sb.WriteString(fmt.Sprintf("Maintainer replied (%d messages):\n\n", len(replies)))
-	}
-	for _, r := range replies {
-		sb.WriteString(fmt.Sprintf("@%s (%s):\n%s\n\n", r.Author, r.Timestamp, r.Body))
-	}
-	sb.WriteString("Continue with the task based on this input.")
-	return sb.String()
-}
-
-// BuildCIFixPrompt creates the prompt sent to Claude when CI fails.
-// branch and prNumber tell Claude exactly where to push so it doesn't
-// open a new branch or PR instead of amending the existing one.
-func BuildCIFixPrompt(failureOutput, branch string, prNumber, retryN, maxRetries int) string {
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(
-		"CI failed on attempt %d of %d.\n\n", retryN, maxRetries,
-	))
-	sb.WriteString(fmt.Sprintf(
-		"IMPORTANT: Push your fix to the existing branch `%s` (PR #%d is already open). "+
-			"Do NOT create a new branch or open a new PR.\n\n",
-		branch, prNumber,
-	))
-	sb.WriteString("If you cannot fix the issue, respond with:\n")
-	sb.WriteString("NEEDS_CLARIFICATION: <description of the problem>\n\n")
-	sb.WriteString("--- CI Failure Output ---\n")
-	sb.WriteString(failureOutput)
-	sb.WriteString("\n------------------------\n\n")
-	sb.WriteString("Diagnose the root cause, fix it, and push to the branch above.")
-	return sb.String()
+	needsInput, question := detectClarification(normalized.OutputText)
+	return &Result{
+		SessionID:  normalized.SessionID,
+		Output:     normalized.OutputText,
+		IsError:    normalized.Status == engine.ResultFailed,
+		NumTurns:   numTurns,
+		NeedsInput: needsInput,
+		Question:   question,
+	}, nil
 }

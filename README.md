@@ -127,7 +127,9 @@ Claude is instructed to create a branch named exactly `madar/issue-<N>` and incl
 | Component | File | Responsibility |
 |---|---|---|
 | **Orchestrator** | `internal/orchestrator/loop.go` | Poll loop, task state machine, concurrency guard |
-| **Claude Runner** | `internal/claude/runner.go` | Spawn `claude` CLI, parse `stream-json` output, detect clarifications |
+| **Engine Contract** | `internal/engine/engine.go` | Provider-neutral requests, events, results, usage, and capabilities |
+| **Claude Adapter** | `internal/engine/claude/adapter.go` | Spawn `claude`, parse `stream-json`, and normalize provider behavior |
+| **Legacy Claude Facade** | `internal/claude/runner.go` | Preserve the v1 runner API and clarification behavior through the adapter |
 | **GitHub Client** | `internal/github/client.go` | List issues, post comments, transition labels |
 | **Store** | `internal/store/store.go` | SQLite: task ↔ session mapping, audit log |
 | **Telegram Gateway** | `internal/telegram/gateway.go` | Send notifications to allowed chat IDs |

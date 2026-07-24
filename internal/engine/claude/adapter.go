@@ -43,11 +43,11 @@ func (a *Adapter) Name() string {
 func (a *Adapter) Capabilities(context.Context) (engine.CapabilitySet, error) {
 	return engine.CapabilitySet{
 		Resume:           true,
-		StructuredOutput: false,
+		StructuredOutput: true,
 		Streaming:        true,
 		Usage:            true,
 		Cancellation:     false,
-		OutputSchema:     false,
+		OutputSchema:     true,
 	}, nil
 }
 
@@ -90,13 +90,13 @@ func (a *Adapter) run(
 	resume bool,
 	emit func(engine.Event) error,
 ) (*engine.Result, error) {
+	var outputValidator *engine.OutputValidator
 	if len(request.OutputSchema) > 0 {
-		return nil, engine.NewExecutionError(
-			engine.ErrorPolicyDenied,
-			a.Name(),
-			"validate-request",
-			errors.New("Claude adapter does not support output schemas"),
-		)
+		var err error
+		outputValidator, err = engine.CompileOutputSchema(request.OutputSchema)
+		if err != nil {
+			return nil, engine.NewExecutionError(engine.ErrorPolicyDenied, a.Name(), "validate-schema", err)
+		}
 	}
 	if err := validateWorkDir(request.WorkDir); err != nil {
 		return nil, engine.NewExecutionError(
@@ -220,6 +220,11 @@ func (a *Adapter) run(
 	result.ExitCode = 0
 	result.StartedAt = startedAt
 	result.CompletedAt = completedAt
+	if outputValidator != nil && result.Status == engine.ResultCompleted {
+		if err := outputValidator.ValidateResult(result); err != nil {
+			return nil, engine.NewExecutionError(engine.ErrorInvalidOutput, a.Name(), "validate-output", err)
+		}
+	}
 	if err := parsed.emitTerminal(emit); err != nil {
 		return nil, engine.NewExecutionError(
 			engine.ErrorUnknown,
@@ -251,6 +256,9 @@ func buildArgs(request engine.RunRequest, resume bool) []string {
 	if request.Policy.SkipPermissions {
 		args = append(args, "--dangerously-skip-permissions")
 	}
+	if len(request.OutputSchema) > 0 {
+		args = append(args, "--json-schema", string(request.OutputSchema))
+	}
 	return args
 }
 
@@ -271,14 +279,15 @@ func mergeEnvironment(base []string, overrides map[string]string) []string {
 }
 
 type streamEvent struct {
-	Type      string            `json:"type"`
-	Subtype   string            `json:"subtype"`
-	SessionID string            `json:"session_id"`
-	Message   *assistantMessage `json:"message"`
-	IsError   bool              `json:"is_error"`
-	Result    string            `json:"result"`
-	NumTurns  int               `json:"num_turns"`
-	Usage     *usage            `json:"usage"`
+	Type             string            `json:"type"`
+	Subtype          string            `json:"subtype"`
+	SessionID        string            `json:"session_id"`
+	Message          *assistantMessage `json:"message"`
+	IsError          bool              `json:"is_error"`
+	Result           string            `json:"result"`
+	NumTurns         int               `json:"num_turns"`
+	Usage            *usage            `json:"usage"`
+	StructuredOutput json.RawMessage   `json:"structured_output"`
 }
 
 type assistantMessage struct {
@@ -398,6 +407,12 @@ func parseStream(r io.Reader, emit func(engine.Event) error) (*parsedStream, err
 				result.SessionID = event.SessionID
 			}
 			result.OutputText = event.Result
+			if len(event.StructuredOutput) > 0 && string(event.StructuredOutput) != "null" {
+				result.OutputJSON = append(result.OutputJSON[:0], event.StructuredOutput...)
+				if result.OutputText == "" {
+					result.OutputText = string(event.StructuredOutput)
+				}
+			}
 			if event.IsError {
 				result.Status = engine.ResultFailed
 			} else {
@@ -422,7 +437,8 @@ func parseStream(r io.Reader, emit func(engine.Event) error) (*parsedStream, err
 	if result.OutputText == "" && len(assistantTexts) > 0 {
 		result.OutputText = strings.Join(assistantTexts, "\n")
 	}
-	if result.Status == engine.ResultCompleted && strings.TrimSpace(result.OutputText) == "" {
+	if result.Status == engine.ResultCompleted && strings.TrimSpace(result.OutputText) == "" &&
+		len(result.OutputJSON) == 0 {
 		return nil, errors.New("claude returned an empty successful result")
 	}
 	return parsed, nil

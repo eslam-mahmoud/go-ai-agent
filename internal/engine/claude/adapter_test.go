@@ -27,10 +27,12 @@ func TestAdapterImplementsEngine(t *testing.T) {
 		t.Fatalf("Capabilities: %v", err)
 	}
 	want := engine.CapabilitySet{
-		Resume:       true,
-		Streaming:    true,
-		Usage:        true,
-		Cancellation: false,
+		Resume:           true,
+		StructuredOutput: true,
+		Streaming:        true,
+		Usage:            true,
+		Cancellation:     false,
+		OutputSchema:     true,
 	}
 	if !reflect.DeepEqual(capabilities, want) {
 		t.Errorf("Capabilities = %#v, want %#v", capabilities, want)
@@ -60,8 +62,10 @@ func TestBuildArgs(t *testing.T) {
 	assertNoArg(t, args, "--resume")
 
 	request.ResumeSessionID = "resume-session"
+	request.OutputSchema = json.RawMessage(`{"type":"object"}`)
 	resumeArgs := buildArgs(request, true)
 	assertArgPair(t, resumeArgs, "--resume", "resume-session")
+	assertArgPair(t, resumeArgs, "--json-schema", `{"type":"object"}`)
 	assertNoArg(t, resumeArgs, "--session-id")
 }
 
@@ -368,15 +372,68 @@ func TestAdapterClassifiesExecutionFailures(t *testing.T) {
 	})
 }
 
-func TestAdapterRejectsUnsupportedSchemaAndCancel(t *testing.T) {
+func TestAdapterRejectsInvalidSchemaAndUnsupportedCancel(t *testing.T) {
 	result, err := New("/bin/sh").Run(context.Background(), engine.RunRequest{
-		OutputSchema: json.RawMessage(`{"type":"object"}`),
+		OutputSchema: json.RawMessage(`{`),
 	}, nil)
 	if result != nil || engine.ClassOf(err) != engine.ErrorPolicyDenied {
 		t.Errorf("result = %#v, error = %v", result, err)
 	}
 	if err := New("/bin/sh").Cancel(context.Background(), "execution-1"); err == nil {
 		t.Fatal("Cancel returned nil for unsupported out-of-band cancellation")
+	}
+}
+
+func TestAdapterValidatesStructuredOutput(t *testing.T) {
+	argsPath := filepath.Join(t.TempDir(), "args")
+	bin := writeFakeClaudeScript(t,
+		"printf '%s\\n' \"$@\" > "+shellQuote(argsPath)+"\n"+
+			"printf '%s\\n' '{\"type\":\"result\",\"is_error\":false,\"result\":\"\",\"session_id\":\"session-json\",\"structured_output\":{\"status\":\"completed\",\"count\":2}}'\n",
+	)
+	schema := json.RawMessage(`{
+		"type":"object",
+		"properties":{"status":{"const":"completed"},"count":{"type":"integer"}},
+		"required":["status","count"],
+		"additionalProperties":false
+	}`)
+	result, err := New(bin).Run(context.Background(), engine.RunRequest{
+		WorkDir:      t.TempDir(),
+		Prompt:       "return JSON",
+		OutputSchema: schema,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if string(result.OutputJSON) != `{"status":"completed","count":2}` {
+		t.Errorf("OutputJSON = %s", result.OutputJSON)
+	}
+	args := readFile(t, argsPath)
+	if !strings.Contains(args, "--json-schema\n"+string(schema)+"\n") {
+		t.Errorf("args do not include inline schema: %q", args)
+	}
+}
+
+func TestAdapterRejectsStructuredMismatchWithoutTerminalEvent(t *testing.T) {
+	bin := writeFakeClaude(t,
+		`{"type":"result","is_error":false,"result":"","structured_output":{"count":"two"}}`,
+		"",
+		0,
+	)
+	var events []engine.Event
+	result, err := New(bin).Run(context.Background(), engine.RunRequest{
+		WorkDir:      t.TempDir(),
+		OutputSchema: json.RawMessage(`{"type":"object","properties":{"count":{"type":"integer"}},"required":["count"]}`),
+	}, func(event engine.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if result != nil || engine.ClassOf(err) != engine.ErrorInvalidOutput {
+		t.Fatalf("result = %#v, error = %v", result, err)
+	}
+	for _, event := range events {
+		if event.Type == engine.EventCompleted || event.Type == engine.EventFailed {
+			t.Errorf("invalid output emitted terminal event: %#v", event)
+		}
 	}
 }
 

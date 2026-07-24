@@ -24,7 +24,8 @@ const (
 )
 
 type Adapter struct {
-	binary string
+	binary        string
+	schemaTempDir string
 }
 
 var _ engine.Engine = (*Adapter)(nil)
@@ -40,10 +41,12 @@ func (a *Adapter) Name() string { return "codex" }
 
 func (a *Adapter) Capabilities(context.Context) (engine.CapabilitySet, error) {
 	return engine.CapabilitySet{
-		Resume:       true,
-		Streaming:    true,
-		Usage:        true,
-		Cancellation: false,
+		Resume:           true,
+		StructuredOutput: true,
+		Streaming:        true,
+		Usage:            true,
+		Cancellation:     false,
+		OutputSchema:     true,
 	}, nil
 }
 
@@ -73,13 +76,19 @@ func (a *Adapter) Cancel(context.Context, string) error {
 }
 
 func (a *Adapter) run(ctx context.Context, request engine.RunRequest, resume bool, emit func(engine.Event) error) (*engine.Result, error) {
+	var outputValidator *engine.OutputValidator
+	schemaPath := ""
 	if len(request.OutputSchema) > 0 {
-		return nil, engine.NewExecutionError(
-			engine.ErrorPolicyDenied,
-			a.Name(),
-			"validate-request",
-			errors.New("Codex schema support is deferred to structured-output validation"),
-		)
+		var err error
+		outputValidator, err = engine.CompileOutputSchema(request.OutputSchema)
+		if err != nil {
+			return nil, engine.NewExecutionError(engine.ErrorPolicyDenied, a.Name(), "validate-schema", err)
+		}
+		schemaPath, err = writeTemporarySchema(a.schemaTempDir, request.OutputSchema)
+		if err != nil {
+			return nil, engine.NewExecutionError(engine.ErrorUnknown, a.Name(), "write-schema", err)
+		}
+		defer os.Remove(schemaPath)
 	}
 	if err := validateWorkDir(request.WorkDir); err != nil {
 		return nil, engine.NewExecutionError(engine.ErrorWorkspaceInvalid, a.Name(), "validate-workspace", err)
@@ -95,7 +104,7 @@ func (a *Adapter) run(ctx context.Context, request engine.RunRequest, resume boo
 		return nil, contextExecutionError("start", err, "")
 	}
 
-	cmd := exec.CommandContext(cmdCtx, a.binary, buildArgs(request, resume)...)
+	cmd := exec.CommandContext(cmdCtx, a.binary, buildArgs(request, resume, schemaPath)...)
 	cmd.Dir = request.WorkDir
 	cmd.Env = mergeEnvironment(os.Environ(), request.Environment)
 	stdout, err := cmd.StdoutPipe()
@@ -172,13 +181,18 @@ func (a *Adapter) run(ctx context.Context, request engine.RunRequest, resume boo
 	result.ExitCode = 0
 	result.StartedAt = startedAt
 	result.CompletedAt = completedAt
+	if outputValidator != nil && result.Status == engine.ResultCompleted {
+		if err := outputValidator.ValidateResult(result); err != nil {
+			return nil, engine.NewExecutionError(engine.ErrorInvalidOutput, a.Name(), "validate-output", err)
+		}
+	}
 	if err := parsed.emitTerminal(emit); err != nil {
 		return nil, engine.NewExecutionError(engine.ErrorUnknown, a.Name(), "emit-event", err)
 	}
 	return result, nil
 }
 
-func buildArgs(request engine.RunRequest, resume bool) []string {
+func buildArgs(request engine.RunRequest, resume bool, schemaPath string) []string {
 	args := []string{"exec"}
 	if resume {
 		args = append(args, "resume")
@@ -201,11 +215,37 @@ func buildArgs(request engine.RunRequest, resume bool) []string {
 			}
 		}
 	}
+	if schemaPath != "" {
+		args = append(args, "--output-schema", schemaPath)
+	}
 	if resume {
 		args = append(args, request.ResumeSessionID)
 	}
 	args = append(args, request.Prompt)
 	return args
+}
+
+func writeTemporarySchema(directory string, schema json.RawMessage) (string, error) {
+	file, err := os.CreateTemp(directory, "madar-codex-schema-*.json")
+	if err != nil {
+		return "", fmt.Errorf("create temporary output schema: %w", err)
+	}
+	path := file.Name()
+	cleanup := true
+	defer func() {
+		_ = file.Close()
+		if cleanup {
+			_ = os.Remove(path)
+		}
+	}()
+	if _, err := file.Write(schema); err != nil {
+		return "", fmt.Errorf("write temporary output schema: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return "", fmt.Errorf("close temporary output schema: %w", err)
+	}
+	cleanup = false
+	return path, nil
 }
 
 type rawEvent struct {

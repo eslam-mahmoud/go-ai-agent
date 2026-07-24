@@ -78,9 +78,13 @@ func Open(path string) (*Store, error) {
 	db.SetMaxOpenConns(1) // SQLite: single writer
 
 	// WAL mode: readers never block writers and vice versa.
-	if _, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;`); err != nil {
+	if _, err := db.Exec(`
+		PRAGMA journal_mode=WAL;
+		PRAGMA synchronous=NORMAL;
+		PRAGMA foreign_keys=ON;
+	`); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("enable WAL: %w", err)
+		return nil, fmt.Errorf("configure sqlite: %w", err)
 	}
 
 	s := &Store{db: db}
@@ -160,6 +164,48 @@ var migrations = []struct {
 	{3, `
 		ALTER TABLE tasks ADD COLUMN engine TEXT NOT NULL DEFAULT '';
 		ALTER TABLE tasks ADD COLUMN model TEXT NOT NULL DEFAULT '';
+	`},
+	// v4: introduce the v2 project aggregate without changing legacy issue
+	// tables. Related project tables are added by later ordered migrations.
+	{4, `
+		CREATE TABLE projects (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo TEXT NOT NULL UNIQUE CHECK (length(trim(repo)) > 0),
+			parent_issue_number INTEGER NOT NULL DEFAULT 0 CHECK (parent_issue_number >= 0),
+			name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+			goal TEXT NOT NULL CHECK (length(trim(goal)) > 0),
+			scope TEXT NOT NULL DEFAULT '',
+			state TEXT NOT NULL CHECK (
+				state IN (
+					'initializing',
+					'planning',
+					'executing',
+					'blocked',
+					'release-review',
+					'completed',
+					'paused'
+				)
+			),
+			health TEXT NOT NULL CHECK (
+				health IN (
+					'on-track',
+					'at-risk',
+					'off-track',
+					'blocked',
+					'ready-for-release'
+				)
+			),
+			current_task_id INTEGER CHECK (current_task_id IS NULL OR current_task_id > 0),
+			current_plan_version INTEGER NOT NULL DEFAULT 0 CHECK (current_plan_version >= 0),
+			architecture_version INTEGER NOT NULL DEFAULT 0 CHECK (architecture_version >= 0),
+			release_target TEXT NOT NULL DEFAULT '',
+			release_readiness TEXT NOT NULL DEFAULT '',
+			last_manager_review_at DATETIME,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL
+		);
+		CREATE INDEX idx_projects_state ON projects(state);
+		CREATE INDEX idx_projects_health ON projects(health);
 	`},
 }
 

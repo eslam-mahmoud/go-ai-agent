@@ -2,6 +2,7 @@
 package project
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -30,6 +31,9 @@ type Store interface {
 	RetryProjectTaskExecution(
 		update store.ProjectExecutionRetry,
 	) (*domain.Execution, error)
+	AppendWorkflowEvent(
+		event *domain.WorkflowEvent,
+	) (*domain.WorkflowEvent, bool, error)
 }
 
 type Snapshot struct {
@@ -123,6 +127,10 @@ func (controller *Controller) TransitionTask(
 		task,
 		target,
 	)
+	evidenceJSON, err := json.Marshal(evidence)
+	if err != nil {
+		return nil, fmt.Errorf("encode task transition evidence: %w", err)
+	}
 	if err := controller.store.ApplyProjectTaskTransition(store.ProjectTaskTransitionUpdate{
 		ProjectID:      projectID,
 		TaskID:         taskID,
@@ -131,6 +139,7 @@ func (controller *Controller) TransitionTask(
 		ProjectState:   projectState,
 		SetCurrentTask: setCurrent,
 		CurrentTaskID:  currentTaskID,
+		Evidence:       evidenceJSON,
 	}); err != nil {
 		return nil, err
 	}
@@ -281,6 +290,102 @@ func (controller *Controller) Retry(
 		return nil, nil, err
 	}
 	return updated, retry, nil
+}
+
+type RecoveryResult struct {
+	Snapshot *Snapshot
+	Decision workflow.RecoveryDecision
+	Retry    *domain.Execution
+}
+
+// Recover applies the deterministic recovery decision for one project. It
+// queues only work backed by a resumable session or durable input artifact and
+// pauses ambiguous active state.
+func (controller *Controller) Recover(projectID int64) (*RecoveryResult, error) {
+	snapshot, err := controller.Snapshot(projectID)
+	if err != nil {
+		return nil, err
+	}
+	var latest *domain.Execution
+	if snapshot.CurrentTask != nil {
+		latest, err = controller.store.GetLatestTaskExecution(snapshot.CurrentTask.ID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	decision, err := workflow.PlanRecovery(workflow.RecoveryInput{
+		Project:         snapshot.Project,
+		CurrentTask:     snapshot.CurrentTask,
+		LatestExecution: latest,
+	})
+	if err != nil {
+		return nil, err
+	}
+	result := &RecoveryResult{Snapshot: snapshot, Decision: decision}
+	switch decision.Action {
+	case workflow.RecoveryQueueRetry:
+		result.Snapshot, result.Retry, err = controller.Retry(projectID)
+	case workflow.RecoveryPauseAmbiguous:
+		result.Snapshot, err = controller.Pause(projectID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := controller.recordRecoveryDecision(snapshot, latest, decision); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (controller *Controller) recordRecoveryDecision(
+	snapshot *Snapshot,
+	execution *domain.Execution,
+	decision workflow.RecoveryDecision,
+) error {
+	event := domain.NewWorkflowEvent(
+		snapshot.Project.ID,
+		domain.WorkflowSourceRecovery,
+		domain.WorkflowRecoveryDecided,
+		decision.Reason,
+	)
+	taskID := int64(0)
+	if snapshot.CurrentTask != nil {
+		taskID = snapshot.CurrentTask.ID
+		event.TaskID = &taskID
+	}
+	executionID := int64(0)
+	if execution != nil {
+		executionID = execution.ID
+		event.ExecutionID = &executionID
+	}
+	taskStatus := domain.TaskStatus("")
+	if snapshot.CurrentTask != nil {
+		taskStatus = snapshot.CurrentTask.Status
+	}
+	data, err := json.Marshal(map[string]any{
+		"action":        decision.Action,
+		"project_state": snapshot.Project.State,
+		"task_status":   taskStatus,
+	})
+	if err != nil {
+		return fmt.Errorf("encode recovery decision: %w", err)
+	}
+	event.Data = data
+	taskUpdatedAt := int64(0)
+	if snapshot.CurrentTask != nil {
+		taskUpdatedAt = snapshot.CurrentTask.UpdatedAt.UnixNano()
+	}
+	event.IdempotencyKey = fmt.Sprintf(
+		"recovery:%d:%d:%d:%s:%d:%d",
+		snapshot.Project.ID,
+		taskID,
+		executionID,
+		decision.Action,
+		snapshot.Project.UpdatedAt.UnixNano(),
+		taskUpdatedAt,
+	)
+	_, _, err = controller.store.AppendWorkflowEvent(event)
+	return err
 }
 
 // TaskStatus and ApplyTaskTransition form the narrow provider-neutral boundary

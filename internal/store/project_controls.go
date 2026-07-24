@@ -61,6 +61,19 @@ func (s *Store) PauseProject(projectID int64, expected domain.ProjectState) erro
 	if err := requireOneControlUpdate(result, projectID); err != nil {
 		return err
 	}
+	if err := appendWorkflowFactTx(
+		tx,
+		projectID,
+		nil,
+		nil,
+		domain.WorkflowSourceController,
+		domain.WorkflowProjectPaused,
+		fmt.Sprintf("Project paused from %s.", expected),
+		map[string]any{"from": expected, "to": domain.ProjectPaused},
+		"",
+	); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit project pause: %w", err)
 	}
@@ -106,6 +119,19 @@ func (s *Store) ResumeProject(projectID int64, target domain.ProjectState) error
 		return fmt.Errorf("resume project: %w", err)
 	}
 	if err := requireOneControlUpdate(result, projectID); err != nil {
+		return err
+	}
+	if err := appendWorkflowFactTx(
+		tx,
+		projectID,
+		nil,
+		nil,
+		domain.WorkflowSourceController,
+		domain.WorkflowProjectResumed,
+		fmt.Sprintf("Project resumed to %s.", target),
+		map[string]any{"from": domain.ProjectPaused, "to": target},
+		"",
+	); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -179,6 +205,23 @@ func (s *Store) CancelProjectTask(update ProjectTaskCancellation) error {
 		return fmt.Errorf("update project after cancellation: %w", err)
 	}
 	if err := requireOneControlUpdate(result, update.ProjectID); err != nil {
+		return err
+	}
+	taskID := update.TaskID
+	if err := appendWorkflowFactTx(
+		tx,
+		update.ProjectID,
+		&taskID,
+		nil,
+		domain.WorkflowSourceController,
+		domain.WorkflowTaskCancelled,
+		"Current task cancelled.",
+		map[string]any{
+			"from":          update.ExpectedTaskStatus,
+			"project_state": projectState,
+		},
+		"",
+	); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -304,6 +347,31 @@ func (s *Store) RetryProjectTaskExecution(
 		return nil, fmt.Errorf("update project for retry: %w", err)
 	}
 	if err := requireOneControlUpdate(result, update.ProjectID); err != nil {
+		return nil, err
+	}
+	taskID := update.TaskID
+	executionID := id
+	if err := appendWorkflowFactTx(
+		tx,
+		update.ProjectID,
+		&taskID,
+		&executionID,
+		domain.WorkflowSourceController,
+		domain.WorkflowExecutionRetried,
+		fmt.Sprintf(
+			"Execution %d retried as attempt %d.",
+			previous.ID,
+			previous.Attempt+1,
+		),
+		map[string]any{
+			"previous_execution_id": previous.ID,
+			"attempt":               previous.Attempt + 1,
+			"mode":                  previous.Mode,
+			"task_status":           update.NewTaskStatus,
+			"resumes_session":       previous.ProviderSessionID != "",
+		},
+		"",
+	); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {

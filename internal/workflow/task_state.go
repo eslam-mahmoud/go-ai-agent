@@ -17,19 +17,19 @@ var (
 // Project Controller is responsible for deriving these facts from persisted
 // artifacts, reviews, CI state, and manager decisions.
 type TaskTransitionEvidence struct {
-	ManagerReviewCompleted  bool
-	ArchitectureRiskPending bool
-	PlanCompleted           bool
-	PlanningDisabled        bool
-	InputProvided           bool
-	BlockingReviewFindings  bool
-	VerificationSucceeded   bool
-	VerificationFailed      bool
-	CIRequired              bool
-	CIPassed                bool
-	CIFailed                bool
-	BlockerResolved         bool
-	Reprioritized           bool
+	ManagerReviewCompleted  bool `json:"manager_review_completed"`
+	ArchitectureRiskPending bool `json:"architecture_risk_pending"`
+	PlanCompleted           bool `json:"plan_completed"`
+	PlanningDisabled        bool `json:"planning_disabled"`
+	InputProvided           bool `json:"input_provided"`
+	BlockingReviewFindings  bool `json:"blocking_review_findings"`
+	VerificationSucceeded   bool `json:"verification_succeeded"`
+	VerificationFailed      bool `json:"verification_failed"`
+	CIRequired              bool `json:"ci_required"`
+	CIPassed                bool `json:"ci_passed"`
+	CIFailed                bool `json:"ci_failed"`
+	BlockerResolved         bool `json:"blocker_resolved"`
+	Reprioritized           bool `json:"reprioritized"`
 }
 
 type TaskTransition struct {

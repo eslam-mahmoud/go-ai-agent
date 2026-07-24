@@ -434,6 +434,14 @@ func runSyncIssue(
 		)
 		return nil
 	}
+	if result.Unchanged {
+		fmt.Fprintf(
+			stdout,
+			"parent project issue #%d is already up to date\n",
+			result.Issue.Number,
+		)
+		return nil
+	}
 	fmt.Fprintf(
 		stdout,
 		"updated parent project issue #%d: %s\n",

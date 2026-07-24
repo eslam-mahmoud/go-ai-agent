@@ -272,6 +272,58 @@ func Write(workspace string, files Files) error {
 	return nil
 }
 
+// WriteChanged writes only when the rendered snapshot differs from what is
+// already on disk, so republishing unchanged state touches no file.
+func WriteChanged(workspace string, files Files) (bool, error) {
+	if len(files.ProjectYAML) == 0 || len(files.PlanMarkdown) == 0 {
+		return false, fmt.Errorf("%w: rendered files must not be empty", ErrInvalidSnapshot)
+	}
+	current, err := storedFilesMatch(workspace, files)
+	if err != nil {
+		return false, err
+	}
+	if current {
+		return false, nil
+	}
+	if err := Write(workspace, files); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// storedFilesMatch reports whether both files exist as regular files whose
+// bytes already equal the rendered snapshot. Anything else counts as a
+// difference so Write applies its own safety checks.
+func storedFilesMatch(workspace string, files Files) (bool, error) {
+	outputDir := filepath.Join(workspace, DirectoryName)
+	for _, candidate := range []struct {
+		path    string
+		content []byte
+	}{
+		{filepath.Join(outputDir, ProjectFileName), files.ProjectYAML},
+		{filepath.Join(outputDir, PlanFileName), files.PlanMarkdown},
+	} {
+		info, err := os.Lstat(candidate.path)
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("inspect project file target: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return false, nil
+		}
+		stored, err := os.ReadFile(candidate.path)
+		if err != nil {
+			return false, fmt.Errorf("read project file target: %w", err)
+		}
+		if !bytes.Equal(stored, candidate.content) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 func prepareOutputDirectory(path string) error {
 	info, err := os.Lstat(path)
 	switch {

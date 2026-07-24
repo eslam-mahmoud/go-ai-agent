@@ -34,8 +34,9 @@ type Client interface {
 }
 
 type SyncResult struct {
-	Issue   *githubclient.Issue
-	Created bool
+	Issue     *githubclient.Issue
+	Created   bool
+	Unchanged bool
 }
 
 // Render creates the complete hidden-marker section for a parent issue.
@@ -196,6 +197,10 @@ func Sync(
 	body, err := MergeManagedSection(existing.Body, section)
 	if err != nil {
 		return nil, err
+	}
+	if body == existing.Body {
+		// Nothing changed; do not spend a write or notify subscribers.
+		return &SyncResult{Issue: existing, Unchanged: true}, nil
 	}
 	updated, err := client.UpdateIssueBody(
 		ctx,

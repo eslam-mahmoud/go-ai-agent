@@ -405,7 +405,12 @@ func TestSyncIssueCreatesLinksAndUpdatesDashboard(t *testing.T) {
 		t.Fatalf("parent issue = %d, want 90", project.ParentIssueNumber)
 	}
 
-	client.existingBody = "Human notes\n\n" + client.createdBody + "\n\nHuman footer"
+	// A stale managed section so the merge is a real change.
+	stale := strings.Replace(client.createdBody, "**Health:** on-track", "**Health:** at-risk", 1)
+	if stale == client.createdBody {
+		t.Fatal("fixture did not produce a stale section")
+	}
+	client.existingBody = "Human notes\n\n" + stale + "\n\nHuman footer"
 	stdout.Reset()
 	stderr.Reset()
 	if err := runSyncIssue(args, &stdout, &stderr, factory); err != nil {
@@ -424,6 +429,17 @@ func TestSyncIssueCreatesLinksAndUpdatesDashboard(t *testing.T) {
 	}
 	if factoryCalls != 2 {
 		t.Errorf("factory calls = %d, want 2", factoryCalls)
+	}
+
+	// Re-syncing an up-to-date issue must not spend a GitHub write.
+	client.existingBody = client.updatedBody
+	stdout.Reset()
+	stderr.Reset()
+	if err := runSyncIssue(args, &stdout, &stderr, factory); err != nil {
+		t.Fatalf("unchanged issue: %v\nstderr: %s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "already up to date") || client.updateCalls != 1 {
+		t.Fatalf("unchanged output=%q calls=%d", stdout.String(), client.updateCalls)
 	}
 }
 

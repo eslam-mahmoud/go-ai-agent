@@ -33,7 +33,15 @@ func TestProjectCRUDAndNullableFields(t *testing.T) {
 		t.Fatalf("GetProjectByRepo: project=%#v error=%v", byRepo, err)
 	}
 
-	taskID := int64(123)
+	projectTask, err := s.CreateProjectTask(domain.NewTask(
+		created.ID,
+		"Current project task",
+		"Exercise the current task relationship",
+	))
+	if err != nil {
+		t.Fatalf("CreateProjectTask: %v", err)
+	}
+	taskID := projectTask.ID
 	reviewedAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
 	byID.ParentIssueNumber = 42
 	byID.Name = "Madar v2"

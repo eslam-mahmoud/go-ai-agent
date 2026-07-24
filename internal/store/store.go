@@ -207,6 +207,96 @@ var migrations = []struct {
 		CREATE INDEX idx_projects_state ON projects(state);
 		CREATE INDEX idx_projects_health ON projects(health);
 	`},
+	// v5: add the ordered v2 project backlog. The legacy tasks table remains
+	// independent until the explicit migration path in backlog item 20.
+	{5, `
+		CREATE TABLE project_tasks (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			issue_number INTEGER NOT NULL DEFAULT 0 CHECK (issue_number >= 0),
+			title TEXT NOT NULL CHECK (length(trim(title)) > 0),
+			goal TEXT NOT NULL CHECK (length(trim(goal)) > 0),
+			status TEXT NOT NULL CHECK (
+				status IN (
+					'proposed',
+					'queued',
+					'selected',
+					'planning',
+					'waiting-input',
+					'developing',
+					'reviewing',
+					'fixing',
+					'verifying',
+					'waiting-ci',
+					'blocked',
+					'completed',
+					'cancelled',
+					'deferred'
+				)
+			),
+			priority INTEGER NOT NULL DEFAULT 0 CHECK (priority >= 0),
+			sequence INTEGER NOT NULL CHECK (sequence > 0),
+			task_type TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL DEFAULT '',
+			source_discovery_id INTEGER CHECK (
+				source_discovery_id IS NULL OR source_discovery_id > 0
+			),
+			blocks_release INTEGER NOT NULL DEFAULT 0 CHECK (blocks_release IN (0, 1)),
+			selected_reason TEXT NOT NULL DEFAULT '',
+			branch_name TEXT NOT NULL DEFAULT '',
+			pr_number INTEGER NOT NULL DEFAULT 0 CHECK (pr_number >= 0),
+			dependency_state TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			UNIQUE(project_id, sequence)
+		);
+		CREATE UNIQUE INDEX idx_project_tasks_issue
+			ON project_tasks(project_id, issue_number)
+			WHERE issue_number > 0;
+		CREATE INDEX idx_project_tasks_status
+			ON project_tasks(project_id, status);
+		CREATE INDEX idx_project_tasks_priority
+			ON project_tasks(project_id, priority DESC, sequence ASC);
+
+		CREATE TRIGGER projects_current_task_insert
+		BEFORE INSERT ON projects
+		WHEN NEW.current_task_id IS NOT NULL
+		BEGIN
+			SELECT CASE WHEN NOT EXISTS (
+				SELECT 1 FROM project_tasks
+				WHERE id = NEW.current_task_id AND project_id = NEW.id
+			) THEN RAISE(ABORT, 'current task must belong to project') END;
+		END;
+
+		CREATE TRIGGER projects_current_task_update
+		BEFORE UPDATE OF current_task_id ON projects
+		WHEN NEW.current_task_id IS NOT NULL
+		BEGIN
+			SELECT CASE WHEN NOT EXISTS (
+				SELECT 1 FROM project_tasks
+				WHERE id = NEW.current_task_id AND project_id = NEW.id
+			) THEN RAISE(ABORT, 'current task must belong to project') END;
+		END;
+
+		CREATE TRIGGER project_tasks_selected_delete
+		BEFORE DELETE ON project_tasks
+		WHEN EXISTS (
+			SELECT 1 FROM projects WHERE current_task_id = OLD.id
+		)
+		BEGIN
+			SELECT RAISE(ABORT, 'selected current task cannot be deleted');
+		END;
+
+		CREATE TRIGGER project_tasks_selected_move
+		BEFORE UPDATE OF project_id ON project_tasks
+		WHEN EXISTS (
+			SELECT 1 FROM projects
+			WHERE current_task_id = OLD.id AND id <> NEW.project_id
+		)
+		BEGIN
+			SELECT RAISE(ABORT, 'selected current task cannot move projects');
+		END;
+	`},
 }
 
 func (s *Store) migrate() error {

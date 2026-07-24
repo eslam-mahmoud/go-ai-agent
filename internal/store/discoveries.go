@@ -466,3 +466,21 @@ func scanDiscovery(row scanner) (*domain.Discovery, error) {
 	discovery.UpdatedAt = discovery.UpdatedAt.UTC()
 	return &discovery, nil
 }
+
+// ListArchitectureRiskDiscoveries returns the discoveries still owing an
+// architecture decision, in deterministic order.
+func (s *Store) ListArchitectureRiskDiscoveries(
+	projectID int64,
+) ([]*domain.Discovery, error) {
+	all, err := s.ListDiscoveries(projectID)
+	if err != nil {
+		return nil, err
+	}
+	outstanding := make([]*domain.Discovery, 0)
+	for _, discovery := range all {
+		if discovery.RequiresArchitectureReview() {
+			outstanding = append(outstanding, discovery)
+		}
+	}
+	return outstanding, nil
+}

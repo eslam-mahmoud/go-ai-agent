@@ -343,6 +343,12 @@ func (fake *fakeSelectionStore) LoadProjectAggregate(int64) (*store.ProjectAggre
 	return fake.aggregate, nil
 }
 
+func (fake *fakeSelectionStore) ListArchitectureRiskDiscoveries(
+	int64,
+) ([]*domain.Discovery, error) {
+	return nil, nil
+}
+
 func (fake *fakeSelectionStore) SelectProjectNextTask(
 	store.ProjectNextTaskSelection,
 ) (*domain.Task, bool, error) {

@@ -330,3 +330,16 @@ var discoveryDecisionStatuses = map[DiscoveryDecision]DiscoveryStatus{
 	DecisionRequestHuman:         DiscoveryDeferred,
 	DecisionRejectOutOfScope:     DiscoveryRejected,
 }
+
+// RequiresArchitectureReview reports whether a discovery still owes an
+// architecture decision. Two cases qualify: an architecture risk nobody has
+// judged yet, and one the manager explicitly escalated to the architect.
+func (discovery *Discovery) RequiresArchitectureReview() bool {
+	if discovery == nil {
+		return false
+	}
+	if discovery.Decision == DecisionRequestArchitecture {
+		return true
+	}
+	return discovery.ArchitectureRisk && !discovery.Status.Evaluated()
+}

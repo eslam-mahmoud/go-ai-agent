@@ -245,3 +245,57 @@ func TestDiscoveryFingerprintCombinesCategoryAndTitle(t *testing.T) {
 		t.Errorf("DiscoveryFingerprint = %q", got)
 	}
 }
+
+func TestDiscoveryRequiresArchitectureReview(t *testing.T) {
+	cases := []struct {
+		name      string
+		discovery Discovery
+		want      bool
+	}{
+		{
+			"unjudged architecture risk",
+			Discovery{ArchitectureRisk: true, Status: DiscoveryUnevaluated},
+			true,
+		},
+		{
+			"escalated without the risk flag",
+			Discovery{Status: DiscoveryDeferred, Decision: DecisionRequestArchitecture},
+			true,
+		},
+		{
+			"risk resolved by another verdict",
+			Discovery{
+				ArchitectureRisk: true,
+				Status:           DiscoveryRejected,
+				Decision:         DecisionRejectOutOfScope,
+			},
+			false,
+		},
+		{
+			"risk accepted as work",
+			Discovery{
+				ArchitectureRisk: true,
+				Status:           DiscoveryAccepted,
+				Decision:         DecisionCreateNextTask,
+			},
+			false,
+		},
+		{
+			"no risk at all",
+			Discovery{Status: DiscoveryUnevaluated},
+			false,
+		},
+	}
+	for _, test := range cases {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			discovery := test.discovery
+			if got := discovery.RequiresArchitectureReview(); got != test.want {
+				t.Errorf("RequiresArchitectureReview() = %v, want %v", got, test.want)
+			}
+		})
+	}
+	if (*Discovery)(nil).RequiresArchitectureReview() {
+		t.Error("nil discovery required architecture review")
+	}
+}

@@ -17,6 +17,7 @@ import (
 	claudeengine "github.com/eslam-mahmoud/go-ai-agent/internal/engine/claude"
 	githubclient "github.com/eslam-mahmoud/go-ai-agent/internal/github"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/orchestrator"
+	"github.com/eslam-mahmoud/go-ai-agent/internal/projectcli"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/store"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/telegram"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/updater"
@@ -30,6 +31,17 @@ var (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "project" {
+		if err := projectcli.Run(os.Args[2:], os.Stdout, os.Stderr); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return
+			}
+			fmt.Fprintf(os.Stderr, "madar project: %v\n", err)
+			os.Exit(2)
+		}
+		return
+	}
+
 	configPath := flag.String("config", "config.yaml", "path to config.yaml")
 	envPath := flag.String("env", ".env", "path to .env file")
 	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error")

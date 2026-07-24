@@ -506,7 +506,14 @@ madar project add-task \
   --type feature \
   --blocks-release
 madar project list-tasks --repo owner/repository
+
+# Materialize the durable snapshot in the configured repository workspace.
+madar project sync-files --repo owner/repository
 ```
+
+The sync command atomically writes `.madar/project.yaml` and
+`.madar/plan.md`. Equal database state produces byte-identical files; the
+generated files contain no wall-clock generation timestamp.
 
 ---
 

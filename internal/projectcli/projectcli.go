@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/eslam-mahmoud/go-ai-agent/internal/config"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/domain"
+	"github.com/eslam-mahmoud/go-ai-agent/internal/projectfiles"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/store"
 )
 
@@ -43,6 +45,8 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return runAddTask(args[1:], stdout, stderr)
 	case "list-tasks":
 		return runListTasks(args[1:], stdout, stderr)
+	case "sync-files":
+		return runSyncFiles(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		printUsage(stdout)
 		return nil
@@ -242,6 +246,53 @@ func runListTasks(args []string, stdout, stderr io.Writer) error {
 	return printTasks(stdout, tasks)
 }
 
+func runSyncFiles(args []string, stdout, stderr io.Writer) error {
+	fs := newFlagSet("project sync-files", stderr)
+	cfgFlags := addConfigFlags(fs)
+	repo := fs.String("repo", "", "project repository identity")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if err := requireValues(requiredValue{"repo", *repo}); err != nil {
+		return err
+	}
+
+	cfg, err := loadConfig(cfgFlags)
+	if err != nil {
+		return err
+	}
+	s, err := store.Open(cfg.DBPath)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	project, err := requireProject(s, *repo)
+	if err != nil {
+		return err
+	}
+	tasks, err := s.ListProjectTasks(project.ID)
+	if err != nil {
+		return err
+	}
+	files, err := projectfiles.Render(project, tasks)
+	if err != nil {
+		return err
+	}
+
+	repoParts := strings.Split(project.Repo, "/")
+	workspace := filepath.Join(cfg.WorkspaceDir, repoParts[0], repoParts[1])
+	if err := projectfiles.Write(workspace, files); err != nil {
+		return err
+	}
+	fmt.Fprintf(
+		stdout,
+		"wrote %s and %s\n",
+		filepath.Join(workspace, projectfiles.DirectoryName, projectfiles.ProjectFileName),
+		filepath.Join(workspace, projectfiles.DirectoryName, projectfiles.PlanFileName),
+	)
+	return nil
+}
+
 func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -280,11 +331,15 @@ func requireValues(values ...requiredValue) error {
 }
 
 func openStore(flags *configFlags) (*store.Store, error) {
-	cfg, err := config.Load(flags.configPath, flags.envPath)
+	cfg, err := loadConfig(flags)
 	if err != nil {
 		return nil, err
 	}
 	return store.Open(cfg.DBPath)
+}
+
+func loadConfig(flags *configFlags) (*config.Config, error) {
+	return config.Load(flags.configPath, flags.envPath)
 }
 
 func requireProject(s *store.Store, repo string) (*domain.Project, error) {
@@ -308,7 +363,11 @@ func normalizeRepo(value string) (string, error) {
 	if len(parts) != 2 ||
 		parts[0] == "" ||
 		parts[1] == "" ||
-		strings.ContainsAny(repo, " \t\r\n") {
+		parts[0] == "." ||
+		parts[0] == ".." ||
+		parts[1] == "." ||
+		parts[1] == ".." ||
+		strings.ContainsAny(repo, " \t\r\n\\") {
 		return "", fmt.Errorf("%w: --repo must use owner/name format", ErrUsage)
 	}
 	return repo, nil
@@ -386,6 +445,7 @@ func printUsage(w io.Writer) {
   madar project show --repo owner/name [options]
   madar project add-task --repo owner/name --title TITLE --goal GOAL [options]
   madar project list-tasks --repo owner/name [options]
+  madar project sync-files --repo owner/name [options]
 
 Every subcommand accepts --config and --env.`)
 }

@@ -69,6 +69,13 @@ func (status ExecutionStatus) Valid() bool {
 	}
 }
 
+// OccupiesProviderLane reports whether the execution owns Madar's single
+// provider-process lane. Pending and terminal/interrupted executions do not
+// prevent another execution from starting.
+func (status ExecutionStatus) OccupiesProviderLane() bool {
+	return status == ExecutionRunning
+}
+
 // Validate checks record integrity but not execution lifecycle transitions.
 func (execution *Execution) Validate() error {
 	if execution == nil {

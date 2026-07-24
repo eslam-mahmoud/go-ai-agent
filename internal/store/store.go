@@ -570,6 +570,14 @@ var migrations = []struct {
 				'reviewing', 'fixing', 'verifying', 'waiting-ci', 'blocked'
 			);
 	`},
+	// v10: one Madar instance may run only one provider process at a time.
+	// The expression index makes the execution lane global across all projects,
+	// tasks, modes, and attempts.
+	{10, `
+		CREATE UNIQUE INDEX idx_executions_single_running
+			ON executions((1))
+			WHERE status = 'running';
+	`},
 }
 
 func (s *Store) migrate() error {
@@ -601,7 +609,11 @@ func (s *Store) migrate() error {
 		}
 		if _, err := tx.Exec(m.sql); err != nil {
 			_ = tx.Rollback()
-			return fmt.Errorf("migration v%d: %w", m.version, err)
+			return fmt.Errorf(
+				"migration v%d: %w",
+				m.version,
+				classifyRunningExecutionConstraint(err),
+			)
 		}
 		if _, err := tx.Exec(
 			`INSERT INTO schema_migrations (version) VALUES (?)`, m.version,

@@ -414,7 +414,10 @@ func migrateLegacyExecution(
 		nullableTime(completedAt),
 	)
 	if err != nil {
-		return 0, false, fmt.Errorf("create migrated legacy execution: %w", err)
+		return 0, false, fmt.Errorf(
+			"create migrated legacy execution: %w",
+			classifyRunningExecutionConstraint(err),
+		)
 	}
 	id, err := result.LastInsertId()
 	if err != nil {

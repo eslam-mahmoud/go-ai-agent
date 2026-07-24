@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "summary",
+    "question",
+    "discoveries",
+    "risks",
+    "recommended_next_action",
+    "project_health",
+    "progress_estimate",
+    "completed_task_decision",
+    "architecture_review_required",
+    "human_approval_required",
+    "discovery_decisions",
+    "backlog_changes",
+    "next_task",
+    "release_readiness",
+    "owner_update"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["completed", "needs_input", "blocked", "failed"]
+    },
+    "summary": {"type": "string", "minLength": 1},
+    "question": {"type": ["string", "null"]},
+    "discoveries": {"type": "array", "items": {"type": "object"}},
+    "risks": {"type": "array", "items": {"type": "object"}},
+    "recommended_next_action": {"type": "string"},
+    "project_health": {
+      "type": "string",
+      "enum": ["on-track", "at-risk", "off-track", "blocked", "ready-for-release"]
+    },
+    "progress_estimate": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "completed_task_decision": {
+      "type": "string",
+      "enum": ["accepted", "rejected", "not-applicable"]
+    },
+    "architecture_review_required": {"type": "boolean"},
+    "human_approval_required": {"type": "boolean"},
+    "discovery_decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["discovery_id", "decision", "reason"],
+        "properties": {
+          "discovery_id": {"type": "integer", "minimum": 1},
+          "decision": {
+            "type": "string",
+            "enum": ["accepted", "rejected", "deferred", "architecture-review", "human-approval"]
+          },
+          "reason": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "backlog_changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["action", "task_id", "position", "reason"],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["insert", "reorder", "defer", "cancel", "reprioritize", "update"]
+          },
+          "task_id": {
+            "oneOf": [
+              {"type": "integer", "minimum": 1},
+              {"type": "null"}
+            ]
+          },
+          "position": {
+            "oneOf": [
+              {"type": "integer", "minimum": 1},
+              {"type": "null"}
+            ]
+          },
+          "reason": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "next_task": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["issue_number", "reason"],
+          "properties": {
+            "issue_number": {"type": "integer", "minimum": 1},
+            "reason": {"type": "string", "minLength": 1}
+          }
+        },
+        {"type": "null"}
+      ]
+    },
+    "release_readiness": {
+      "type": "string",
+      "enum": ["not-ready", "at-risk", "ready", "blocked"]
+    },
+    "owner_update": {"type": "string", "minLength": 1}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "needs_input"}}},
+      "then": {"properties": {"question": {"type": "string", "minLength": 1}}},
+      "else": {"properties": {"question": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"release_readiness": {"const": "ready"}}},
+      "then": {
+        "properties": {
+          "project_health": {"const": "ready-for-release"},
+          "progress_estimate": {"const": 100},
+          "next_task": {"type": "null"}
+        }
+      }
+    }
+  ]
+}

@@ -19,6 +19,7 @@ func TestBuiltinDefinitionsCompileAndDeclareFreshReviewer(t *testing.T) {
 		workflow.ModeReviewer,
 		workflow.ModeFixer,
 		workflow.ModeVerifier,
+		workflow.ModeManager,
 	}
 	if len(definitions) != len(want) {
 		t.Fatalf("definitions = %d, want %d", len(definitions), len(want))
@@ -48,6 +49,7 @@ func TestBuiltinSchemasAcceptCanonicalOutputsAndRejectDrift(t *testing.T) {
 		workflow.ModeReviewer:  validReviewerOutput(OutputCompleted, true),
 		workflow.ModeFixer:     validFixerOutput(OutputCompleted),
 		workflow.ModeVerifier:  validVerifierOutput(OutputCompleted),
+		workflow.ModeManager:   validManagerOutput(OutputCompleted),
 	}
 	for name, raw := range outputs {
 		t.Run(string(name), func(t *testing.T) {
@@ -229,6 +231,30 @@ func validVerifierOutput(status OutputStatus) json.RawMessage {
 		"working_tree_clean":          true,
 		"ci_passed":                   true,
 		"blocking_findings_remaining": 0,
+	})
+}
+
+func validManagerOutput(status OutputStatus) json.RawMessage {
+	return mustJSON(map[string]any{
+		"status":                       status,
+		"summary":                      "Project reviewed.",
+		"question":                     nil,
+		"discoveries":                  []any{},
+		"risks":                        []any{},
+		"recommended_next_action":      "Start the selected task.",
+		"project_health":               "on-track",
+		"progress_estimate":            50,
+		"completed_task_decision":      "accepted",
+		"architecture_review_required": false,
+		"human_approval_required":      false,
+		"discovery_decisions":          []any{},
+		"backlog_changes":              []any{},
+		"next_task": map[string]any{
+			"issue_number": 136,
+			"reason":       "Next dependency.",
+		},
+		"release_readiness": "not-ready",
+		"owner_update":      "Project remains on track.",
 	})
 }
 

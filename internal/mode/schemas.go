@@ -17,6 +17,7 @@ var builtinSchemaFiles = map[workflow.ModeName]string{
 	workflow.ModeReviewer:  "schemas/reviewer.json",
 	workflow.ModeFixer:     "schemas/fixer.json",
 	workflow.ModeVerifier:  "schemas/verifier.json",
+	workflow.ModeManager:   "schemas/manager.json",
 }
 
 var builtinDescriptions = map[workflow.ModeName]string{
@@ -25,6 +26,7 @@ var builtinDescriptions = map[workflow.ModeName]string{
 	workflow.ModeReviewer:  "Independently review the implementation and acceptance evidence.",
 	workflow.ModeFixer:     "Address bounded blocking findings without unrelated changes.",
 	workflow.ModeVerifier:  "Verify acceptance criteria, repository state, PR consistency, and CI.",
+	workflow.ModeManager:   "Evaluate project health and choose the next governed delivery action.",
 }
 
 // BuiltinDefinition returns a defensive copy of the canonical delivery-mode
@@ -60,6 +62,7 @@ func BuiltinDefinitions() ([]Definition, error) {
 		workflow.ModeReviewer,
 		workflow.ModeFixer,
 		workflow.ModeVerifier,
+		workflow.ModeManager,
 	}
 	definitions := make([]Definition, 0, len(names))
 	for _, name := range names {

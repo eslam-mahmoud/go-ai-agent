@@ -17,6 +17,7 @@ var (
 
 type SelectionStore interface {
 	LoadProjectAggregate(projectID int64) (*store.ProjectAggregate, error)
+	ListArchitectureRiskDiscoveries(projectID int64) ([]*domain.Discovery, error)
 	SelectProjectNextTask(
 		selection store.ProjectNextTaskSelection,
 	) (*domain.Task, bool, error)
@@ -83,7 +84,13 @@ func (controller *SelectionController) SelectNextTask(
 	if err != nil {
 		return nil, err
 	}
-	if err := requireEligibleSelection(aggregate, review, task); err != nil {
+	// Architecture risk blocks the whole lane, not one task: work must not
+	// begin while an architecture decision is still owed.
+	outstanding, err := controller.store.ListArchitectureRiskDiscoveries(projectID)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireEligibleSelection(aggregate, review, task, len(outstanding) > 0); err != nil {
 		return nil, err
 	}
 
@@ -153,6 +160,7 @@ func requireEligibleSelection(
 	aggregate *store.ProjectAggregate,
 	review *domain.ManagerReview,
 	task *domain.Task,
+	architectureRiskPending bool,
 ) error {
 	if aggregate.Project.State == domain.ProjectPaused {
 		return fmt.Errorf(
@@ -197,7 +205,7 @@ func requireEligibleSelection(
 		To:   domain.TaskSelected,
 		Evidence: workflow.TaskTransitionEvidence{
 			ManagerReviewCompleted:  true,
-			ArchitectureRiskPending: review.ArchitectureReviewRequired,
+			ArchitectureRiskPending: review.ArchitectureReviewRequired || architectureRiskPending,
 		},
 	})
 }

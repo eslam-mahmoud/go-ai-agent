@@ -21,20 +21,21 @@ const (
 type WorkflowEventType string
 
 const (
-	WorkflowTaskTransitioned     WorkflowEventType = "task.transitioned"
-	WorkflowProjectPaused        WorkflowEventType = "project.paused"
-	WorkflowProjectResumed       WorkflowEventType = "project.resumed"
-	WorkflowTaskCancelled        WorkflowEventType = "task.cancelled"
-	WorkflowExecutionRetried     WorkflowEventType = "execution.retried"
-	WorkflowExecutionInterrupted WorkflowEventType = "execution.interrupted"
-	WorkflowRecoveryDecided      WorkflowEventType = "recovery.decided"
-	WorkflowBacklogReordered     WorkflowEventType = "backlog.reordered"
-	WorkflowTaskSelected         WorkflowEventType = "task.selected"
-	WorkflowProjectPublished     WorkflowEventType = "project.published"
-	WorkflowDiscoveriesRecorded  WorkflowEventType = "discoveries.recorded"
-	WorkflowDiscoveriesDecided   WorkflowEventType = "discoveries.decided"
-	WorkflowDiscoveryPublished   WorkflowEventType = "discovery.published"
-	WorkflowDiscoveryQueued      WorkflowEventType = "discovery.queued"
+	WorkflowTaskTransitioned           WorkflowEventType = "task.transitioned"
+	WorkflowProjectPaused              WorkflowEventType = "project.paused"
+	WorkflowProjectResumed             WorkflowEventType = "project.resumed"
+	WorkflowTaskCancelled              WorkflowEventType = "task.cancelled"
+	WorkflowExecutionRetried           WorkflowEventType = "execution.retried"
+	WorkflowExecutionInterrupted       WorkflowEventType = "execution.interrupted"
+	WorkflowRecoveryDecided            WorkflowEventType = "recovery.decided"
+	WorkflowBacklogReordered           WorkflowEventType = "backlog.reordered"
+	WorkflowTaskSelected               WorkflowEventType = "task.selected"
+	WorkflowProjectPublished           WorkflowEventType = "project.published"
+	WorkflowDiscoveriesRecorded        WorkflowEventType = "discoveries.recorded"
+	WorkflowDiscoveriesDecided         WorkflowEventType = "discoveries.decided"
+	WorkflowDiscoveryPublished         WorkflowEventType = "discovery.published"
+	WorkflowDiscoveryQueued            WorkflowEventType = "discovery.queued"
+	WorkflowArchitectureReviewRequired WorkflowEventType = "architecture.review-required"
 )
 
 var ErrInvalidWorkflowEvent = errors.New("invalid workflow event")

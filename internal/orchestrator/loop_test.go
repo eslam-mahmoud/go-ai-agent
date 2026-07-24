@@ -30,6 +30,10 @@ type fakeGitHub struct {
 func (f *fakeGitHub) GetAuthenticatedUsername(_ context.Context) (string, error) {
 	return "madar-bot", nil
 }
+func (f *fakeGitHub) ListOpenIssues(_ context.Context, _, _ string) ([]*githubclient.Issue, error) {
+	return nil, nil
+}
+
 func (f *fakeGitHub) ListReadyIssues(_ context.Context, _, _, _ string) ([]*githubclient.Issue, error) {
 	return f.issues, nil
 }

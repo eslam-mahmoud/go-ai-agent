@@ -275,3 +275,107 @@ func decisionIDs(decisions []DiscoveryDecisionRecord) []int64 {
 	}
 	return ids
 }
+
+var ErrDiscoveryIssueConflict = errors.New("discovery issue conflict")
+
+type DiscoveryIssueUpdate struct {
+	ProjectID   int64
+	DiscoveryID int64
+	IssueNumber int
+	Reused      bool
+}
+
+// RecordDiscoveryIssue binds a discovery to the GitHub issue that represents
+// it. The compare-and-set on an unset issue number is what stops two runs from
+// publishing the same discovery twice.
+func (s *Store) RecordDiscoveryIssue(
+	update DiscoveryIssueUpdate,
+) (*domain.Discovery, error) {
+	if update.ProjectID <= 0 || update.DiscoveryID <= 0 || update.IssueNumber <= 0 {
+		return nil, fmt.Errorf(
+			"%w: project, discovery, and issue numbers must be positive",
+			domain.ErrInvalidDiscovery,
+		)
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin record discovery issue: %w", err)
+	}
+	defer tx.Rollback()
+
+	var storedProjectID int64
+	var storedIssue int
+	err = tx.QueryRow(`
+		SELECT project_id, created_issue_number FROM discoveries WHERE id = ?
+	`, update.DiscoveryID).Scan(&storedProjectID, &storedIssue)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("%w: ID %d", ErrDiscoveryNotFound, update.DiscoveryID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read discovery for issue: %w", err)
+	}
+	if storedProjectID != update.ProjectID {
+		return nil, fmt.Errorf(
+			"%w: discovery %d belongs to project %d, not %d",
+			ErrDiscoveryOwnership,
+			update.DiscoveryID,
+			storedProjectID,
+			update.ProjectID,
+		)
+	}
+	if storedIssue == update.IssueNumber {
+		// Already bound to this issue; nothing to write.
+		if err := tx.Rollback(); err != nil {
+			return nil, fmt.Errorf("close replayed discovery issue: %w", err)
+		}
+		return s.GetDiscoveryByID(update.DiscoveryID)
+	}
+	if storedIssue != 0 {
+		return nil, fmt.Errorf(
+			"%w: discovery %d already records issue #%d",
+			ErrDiscoveryIssueConflict,
+			update.DiscoveryID,
+			storedIssue,
+		)
+	}
+
+	now := time.Now().UTC()
+	result, err := tx.Exec(`
+		UPDATE discoveries
+		SET created_issue_number = ?, updated_at = ?
+		WHERE id = ? AND project_id = ? AND created_issue_number = 0
+	`, update.IssueNumber, now, update.DiscoveryID, update.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("record discovery issue: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil {
+		return nil, fmt.Errorf("read discovery issue count: %w", err)
+	} else if changed != 1 {
+		return nil, fmt.Errorf(
+			"%w: discovery %d changed while being published",
+			ErrDiscoveryIssueConflict,
+			update.DiscoveryID,
+		)
+	}
+	if err := appendWorkflowFactTx(
+		tx,
+		update.ProjectID,
+		nil,
+		nil,
+		domain.WorkflowSourceController,
+		domain.WorkflowDiscoveryPublished,
+		fmt.Sprintf("Discovery %d published as issue #%d.", update.DiscoveryID, update.IssueNumber),
+		map[string]any{
+			"discovery_id": update.DiscoveryID,
+			"issue_number": update.IssueNumber,
+			"reused_issue": update.Reused,
+		},
+		fmt.Sprintf("discovery:%d:issue", update.DiscoveryID),
+	); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit record discovery issue: %w", err)
+	}
+	return s.GetDiscoveryByID(update.DiscoveryID)
+}

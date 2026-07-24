@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,10 +20,10 @@ import (
 // --- fakes ---
 
 type fakeGitHub struct {
-	issues       []*githubclient.Issue
-	comments     []*githubclient.Comment
+	issues        []*githubclient.Issue
+	comments      []*githubclient.Comment
 	postedComment string
-	labelsSet    []string
+	labelsSet     []string
 }
 
 func (f *fakeGitHub) GetAuthenticatedUsername(_ context.Context) (string, error) {
@@ -75,14 +76,22 @@ func (f *fakeGitHub) CreateIssue(_ context.Context, _, _, _, _ string, _ []strin
 func (f *fakeGitHub) CloseIssue(_ context.Context, _, _ string, _ int) error { return nil }
 
 type fakeRunner struct {
-	result        *claude.Result
-	err           error
-	capturePrompt *string // if non-nil, captures the prompt from the last Run call
+	result         *claude.Result
+	err            error
+	capturePrompt  *string // if non-nil, captures the prompt from the last Run call
+	captureOptions *claude.RunOptions
+	onRun          func()
 }
 
 func (f *fakeRunner) Run(_ context.Context, opts claude.RunOptions) (*claude.Result, error) {
 	if f.capturePrompt != nil {
 		*f.capturePrompt = opts.Prompt
+	}
+	if f.captureOptions != nil {
+		*f.captureOptions = opts
+	}
+	if f.onRun != nil {
+		f.onRun()
 	}
 	return f.result, f.err
 }
@@ -302,7 +311,7 @@ func TestTick_claudeResultError_transitionsToAwaitingFeedback(t *testing.T) {
 	}
 }
 
-func TestTick_shutdownTransitionsToAwaitingFeedback(t *testing.T) {
+func TestTick_shutdownTransitionsToInterruptedWithoutClarification(t *testing.T) {
 	gh := &fakeGitHub{
 		issues: []*githubclient.Issue{
 			{Number: 10, Title: "Task", HTMLURL: "url", Labels: []string{"ready"}},
@@ -320,13 +329,103 @@ func TestTick_shutdownTransitionsToAwaitingFeedback(t *testing.T) {
 	loop := testLoop(t, gh, runner, tg, s)
 	_ = loop.tick(cancelledCtx)
 
-	// Task should be in awaiting-feedback, not stuck in-progress.
+	// Task should be durably interrupted without asking a routine restart
+	// question on GitHub.
 	task, _ := s.GetTask("owner/repo", 10)
 	if task == nil {
 		t.Fatal("task not found")
 	}
-	if task.State != store.StateAwaitingFeedback {
-		t.Errorf("state = %q after shutdown, want awaiting-feedback", task.State)
+	if task.State != store.StateInterrupted {
+		t.Errorf("state = %q after shutdown, want interrupted", task.State)
+	}
+	if gh.postedComment != "" {
+		t.Errorf("shutdown posted clarification comment: %q", gh.postedComment)
+	}
+	entries, _ := s.GetAuditLog("owner/repo", 10)
+	if len(entries) == 0 || entries[len(entries)-1].Event != "interrupted" {
+		t.Errorf("audit log = %#v, want final interrupted event", entries)
+	}
+}
+
+func TestRecoverInterruptedResumesStoredSession(t *testing.T) {
+	gh := &fakeGitHub{
+		issues: []*githubclient.Issue{
+			{
+				Number:  42,
+				Title:   "Recover me",
+				HTMLURL: "https://github.com/owner/repo/issues/42",
+				Labels:  []string{"in-progress"},
+			},
+		},
+	}
+	s := testStore(t)
+	_, _ = s.UpsertTask("owner/repo", 42, store.StateInProgress, "session-42")
+
+	var captured claude.RunOptions
+	runner := &fakeRunner{
+		result:         &claude.Result{Output: "recovered and completed"},
+		captureOptions: &captured,
+		onRun: func() {
+			task, err := s.GetTask("owner/repo", 42)
+			if err != nil {
+				t.Errorf("GetTask during recovery: %v", err)
+				return
+			}
+			if task.State != store.StateRecovering {
+				t.Errorf("state during provider run = %q, want recovering", task.State)
+			}
+		},
+	}
+	loop := testLoop(t, gh, runner, &fakeTelegram{}, s)
+
+	if err := loop.recoverInterrupted(context.Background()); err != nil {
+		t.Fatalf("recoverInterrupted: %v", err)
+	}
+
+	if captured.ResumeID != "session-42" {
+		t.Errorf("ResumeID = %q, want session-42", captured.ResumeID)
+	}
+	if captured.SessionID != "" {
+		t.Errorf("SessionID = %q, want empty for resume", captured.SessionID)
+	}
+	if !containsStr(captured.Prompt, "interrupted") {
+		t.Errorf("recovery prompt = %q, want interruption context", captured.Prompt)
+	}
+	task, _ := s.GetTask("owner/repo", 42)
+	if task.State != store.StateDone {
+		t.Errorf("final state = %q, want done", task.State)
+	}
+	entries, _ := s.GetAuditLog("owner/repo", 42)
+	events := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		events = append(events, entry.Event)
+	}
+	if !containsStr(strings.Join(events, ","), "interrupted") ||
+		!containsStr(strings.Join(events, ","), "recovering") {
+		t.Errorf("audit events = %v, want interrupted and recovering", events)
+	}
+}
+
+func TestRecoverInterruptedDoesNotResumeCIWaitingTask(t *testing.T) {
+	s := testStore(t)
+	_, _ = s.UpsertTask("owner/repo", 43, store.StateInProgress, "session-43")
+	_ = s.SetCIState("owner/repo", 43, store.CIStateWaiting)
+	runnerCalls := 0
+	runner := &fakeRunner{
+		result: &claude.Result{Output: "unexpected"},
+		onRun:  func() { runnerCalls++ },
+	}
+	loop := testLoop(t, &fakeGitHub{}, runner, &fakeTelegram{}, s)
+
+	if err := loop.recoverInterrupted(context.Background()); err != nil {
+		t.Fatalf("recoverInterrupted: %v", err)
+	}
+	if runnerCalls != 0 {
+		t.Errorf("runner calls = %d, want 0", runnerCalls)
+	}
+	task, _ := s.GetTask("owner/repo", 43)
+	if task.State != store.StateInProgress || task.CIState != store.CIStateWaiting {
+		t.Errorf("CI task after recovery = state %q, ci %q", task.State, task.CIState)
 	}
 }
 

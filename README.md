@@ -138,6 +138,9 @@ Claude is instructed to create a branch named exactly `madar/issue-<N>` and incl
 ```
 ready ──▶ in-progress ──▶ done
                 │
+                ├── process stops ──▶ interrupted ──▶ recovering
+                │                                      │
+                │                                      └──▶ done / awaiting-feedback
                 ▼
          awaiting-feedback
                 │
@@ -147,7 +150,11 @@ ready ──▶ in-progress ──▶ done
           in-progress ──▶ done
 ```
 
-State is expressed entirely through GitHub Issue labels. The SQLite store holds the session ID and clarification timestamp so Madar knows which Claude session to resume and which comments are human replies.
+Public state is expressed through GitHub Issue labels. SQLite additionally
+uses `interrupted` and `recovering` while restarting an unfinished provider
+execution; the issue keeps its `in-progress` label throughout recovery. The
+store retains the provider session ID so Madar resumes the same session rather
+than asking for routine restart guidance.
 
 ### Claude Code Integration
 
@@ -463,7 +470,7 @@ sudo journalctl -fu madar   # follow logs
 | `-env` | `.env` | Path to the .env file (skipped if the file doesn't exist) |
 | `-log-level` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
 | `-version` | — | Print version, commit, and build date then exit |
-| `-status` | — | Print active tasks, CI-watching tasks, awaiting-feedback tasks then exit |
+| `-status` | — | Print active, interrupted, recovering, CI-watching, and awaiting-feedback tasks then exit |
 | `-update` | — | Check for a newer release, download it, and replace the running binary then exit |
 
 ---
@@ -519,11 +526,11 @@ Add `GITHUB_TOKEN=ghp_...` to your `.env` file. The token needs `repo` scope.
 Check that the `ready` label name in `config.yaml` exactly matches what's on the GitHub repo (case-sensitive). Run `madar -status` to see what the agent is currently watching.
 
 ### Task stuck `in-progress`
-A crash mid-run can leave an issue labelled `in-progress` in SQLite with no active process. Fix it:
-```bash
-sqlite3 ./madar.db "UPDATE tasks SET state='awaiting-feedback' WHERE repo='owner/repo' AND issue_number=42;"
-```
-Then manually change the GitHub label from `in-progress` to `awaiting-feedback` and post a comment on the issue.
+On startup, Madar automatically marks unfinished provider executions
+`interrupted`, transitions them to `recovering`, and resumes their stored
+session. The GitHub issue remains labelled `in-progress`. Run `madar -status`
+to inspect recovery state. Human input is requested only when durable recovery
+information such as the provider session ID is missing.
 
 ### Workspace clone failing (private repo)
 Ensure `GITHUB_TOKEN` has `repo` scope. Madar uses authenticated HTTPS (`x-access-token` via environment variables — the token is never written to `.git/config`).
@@ -535,5 +542,6 @@ Only one `madar` process should run at a time. Check for zombie processes: `pgre
 ```bash
 ./madar -config config.yaml -status
 ```
-Prints schema version, active tasks, awaiting-feedback tasks, and CI-watching tasks.
+Prints schema version, active, interrupted, recovering, awaiting-feedback, and
+CI-watching tasks.
 ```

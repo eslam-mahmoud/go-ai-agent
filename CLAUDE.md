@@ -60,16 +60,20 @@ When working on this repo via GitHub Issues, **always**:
 
 ```
 ready → in-progress → done (closed)
-              ↓
-       awaiting-feedback  ←→  in-progress
+          │       │
+          │       └→ interrupted → recovering
+          ↓
+ awaiting-feedback  ←→  in-progress
 ```
 
-State is expressed as GitHub Issue labels. SQLite holds session IDs and
-timestamps. Never transition state without updating both.
+Public task state is expressed as GitHub Issue labels. SQLite additionally
+uses the internal `interrupted` and `recovering` states during restart
+recovery; both retain the public `in-progress` label. SQLite also holds session
+IDs and timestamps. Never change a public state without updating both systems.
 
-**Concurrency guard:** only `in-progress` tasks count toward `max_parallel`.
-`awaiting-feedback` tasks are parked (Claude is idle) and do not block new
-work from being picked up.
+**Concurrency guard:** `in-progress` and `recovering` tasks count toward
+`max_parallel`. `awaiting-feedback` tasks are parked (Claude is idle) and do
+not block new work from being picked up.
 
 ## Adding a New Enhancement
 
@@ -96,6 +100,7 @@ convention above is mandatory — the CI watcher looks for that exact branch.
 - Telegram messages are capped at 4096 bytes in `send()`.
 - `gitEnvWithToken` injects credentials via environment; never pass a token in a git URL argument or config file.
 - `ci.wait_timeout` is checked against `task.CIWatchStartedAt` (set once when CI watching starts), NOT `task.UpdatedAt` — retries do not reset the deadline.
-- `CountActive()` counts only `state='in-progress' AND ci_state=''`. CI-watching and awaiting-feedback tasks are excluded so they don't block new work.
+- `CountActive()` counts `in-progress` and `recovering` tasks where `ci_state=''`. CI-watching, interrupted, and awaiting-feedback tasks are excluded.
+- Startup calls `MarkActiveTasksInterrupted()` before recovery. Never mark CI-waiting tasks interrupted; they have no provider process to resume.
 - Prune interval and retention are in `cleanup:` config (default 24h interval, 30d audit, 90d tasks).
 - Run `./madar -status` to inspect active tasks without reading the database directly.

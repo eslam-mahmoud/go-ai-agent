@@ -15,6 +15,8 @@ type TaskState string
 const (
 	StateReady            TaskState = "ready"
 	StateInProgress       TaskState = "in-progress"
+	StateInterrupted      TaskState = "interrupted"
+	StateRecovering       TaskState = "recovering"
 	StateAwaitingFeedback TaskState = "awaiting-feedback"
 	StateDone             TaskState = "done"
 )
@@ -280,6 +282,68 @@ func (s *Store) ListByCIState(ciState CIState) ([]*Task, error) {
 	return tasks, rows.Err()
 }
 
+// MarkActiveTasksInterrupted atomically records process-bound tasks left by a
+// previous daemon instance. CI-waiting tasks are intentionally excluded
+// because they have no provider process to recover.
+func (s *Store) MarkActiveTasksInterrupted() (int64, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("begin interruption transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.Query(`
+		SELECT repo, issue_number
+		FROM tasks
+		WHERE state IN ('in-progress', 'recovering') AND ci_state = ''
+		ORDER BY created_at ASC
+	`)
+	if err != nil {
+		return 0, fmt.Errorf("list active tasks for interruption: %w", err)
+	}
+
+	type taskKey struct {
+		repo        string
+		issueNumber int
+	}
+	var tasks []taskKey
+	for rows.Next() {
+		var task taskKey
+		if err := rows.Scan(&task.repo, &task.issueNumber); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scan active task for interruption: %w", err)
+		}
+		tasks = append(tasks, task)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf("close active task rows: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate active tasks for interruption: %w", err)
+	}
+
+	now := time.Now().UTC()
+	for _, task := range tasks {
+		if _, err := tx.Exec(`
+			UPDATE tasks SET state = ?, updated_at = ?
+			WHERE repo = ? AND issue_number = ?
+		`, string(StateInterrupted), now, task.repo, task.issueNumber); err != nil {
+			return 0, fmt.Errorf("mark task interrupted: %w", err)
+		}
+		if _, err := tx.Exec(`
+			INSERT INTO audit_log (repo, issue_number, event, details)
+			VALUES (?, ?, 'interrupted', 'startup detected an unfinished provider execution')
+		`, task.repo, task.issueNumber); err != nil {
+			return 0, fmt.Errorf("audit interrupted task: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit interruption transaction: %w", err)
+	}
+	return int64(len(tasks)), nil
+}
+
 // CountActive returns the number of tasks Claude is actively executing.
 // Excluded from the count:
 //   - awaiting-feedback: parked, waiting for human input, Claude is idle
@@ -291,7 +355,7 @@ func (s *Store) CountActive() (int, error) {
 	var count int
 	err := s.db.QueryRow(`
 		SELECT COUNT(*) FROM tasks
-		WHERE state = 'in-progress' AND ci_state = ''
+		WHERE state IN ('in-progress', 'recovering') AND ci_state = ''
 	`).Scan(&count)
 	return count, err
 }

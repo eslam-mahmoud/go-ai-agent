@@ -160,6 +160,8 @@ func printStatus(s *store.Store, cfg *config.Config) {
 	v, _ := s.SchemaVersion()
 	active, _ := s.CountActive()
 	inProgress, _ := s.ListByState(store.StateInProgress)
+	interrupted, _ := s.ListByState(store.StateInterrupted)
+	recovering, _ := s.ListByState(store.StateRecovering)
 	waiting, _ := s.ListByState(store.StateAwaitingFeedback)
 	ciWaiting, _ := s.ListByCIState(store.CIStateWaiting)
 
@@ -170,6 +172,14 @@ func printStatus(s *store.Store, cfg *config.Config) {
 	fmt.Printf("  active (claude): %d\n", active)
 	fmt.Printf("  in-progress    : %d\n", len(inProgress))
 	for _, t := range inProgress {
+		fmt.Printf("    #%d %s (session %s)\n", t.IssueNumber, t.Repo, t.SessionID)
+	}
+	fmt.Printf("  interrupted   : %d\n", len(interrupted))
+	for _, t := range interrupted {
+		fmt.Printf("    #%d %s (session %s)\n", t.IssueNumber, t.Repo, t.SessionID)
+	}
+	fmt.Printf("  recovering    : %d\n", len(recovering))
+	for _, t := range recovering {
 		fmt.Printf("    #%d %s (session %s)\n", t.IssueNumber, t.Repo, t.SessionID)
 	}
 	fmt.Printf("  awaiting-feedback: %d\n", len(waiting))

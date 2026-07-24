@@ -283,13 +283,13 @@ func TestListByState(t *testing.T) {
 
 func TestCountActive(t *testing.T) {
 	s := openTestStore(t)
-	_, _ = s.UpsertTask("r", 1, StateInProgress, "s")            // active — counted
-	_, _ = s.UpsertTask("r", 2, StateAwaitingFeedback, "s")      // parked — not counted
-	_, _ = s.UpsertTask("r", 3, StateDone, "s")                  // done — not counted
-	_, _ = s.UpsertTask("r", 4, StateReady, "s")                 // not started — not counted
-	_, _ = s.UpsertTask("r", 5, StateInProgress, "s")            // active — counted
-	_ = s.SetCIState("r", 5, CIStateWaiting)                     // CI-watching — not counted
-	_, _ = s.UpsertTask("r", 6, StateInProgress, "s")            // genuinely active — counted
+	_, _ = s.UpsertTask("r", 1, StateInProgress, "s")       // active — counted
+	_, _ = s.UpsertTask("r", 2, StateAwaitingFeedback, "s") // parked — not counted
+	_, _ = s.UpsertTask("r", 3, StateDone, "s")             // done — not counted
+	_, _ = s.UpsertTask("r", 4, StateReady, "s")            // not started — not counted
+	_, _ = s.UpsertTask("r", 5, StateInProgress, "s")       // active — counted
+	_ = s.SetCIState("r", 5, CIStateWaiting)                // CI-watching — not counted
+	_, _ = s.UpsertTask("r", 6, StateInProgress, "s")       // genuinely active — counted
 
 	count, err := s.CountActive()
 	if err != nil {
@@ -299,6 +299,75 @@ func TestCountActive(t *testing.T) {
 	// Issue 1: counted. Issue 5: CI-watching, not counted. Issue 6: counted.
 	if count != 2 {
 		t.Errorf("CountActive = %d, want 2", count)
+	}
+}
+
+func TestRecoveryStatesRoundTrip(t *testing.T) {
+	s := openTestStore(t)
+	cases := []TaskState{StateInterrupted, StateRecovering}
+
+	for i, state := range cases {
+		issueNumber := 100 + i
+		if _, err := s.UpsertTask("owner/repo", issueNumber, state, "session"); err != nil {
+			t.Fatalf("UpsertTask(%q): %v", state, err)
+		}
+		task, err := s.GetTask("owner/repo", issueNumber)
+		if err != nil {
+			t.Fatalf("GetTask(%q): %v", state, err)
+		}
+		if task.State != state {
+			t.Errorf("state round trip = %q, want %q", task.State, state)
+		}
+	}
+}
+
+func TestMarkActiveTasksInterrupted(t *testing.T) {
+	s := openTestStore(t)
+	_, _ = s.UpsertTask("r", 1, StateInProgress, "active")
+	_, _ = s.UpsertTask("r", 2, StateRecovering, "recovering")
+	_, _ = s.UpsertTask("r", 3, StateInProgress, "ci")
+	_ = s.SetCIState("r", 3, CIStateWaiting)
+	_, _ = s.UpsertTask("r", 4, StateAwaitingFeedback, "waiting")
+
+	count, err := s.MarkActiveTasksInterrupted()
+	if err != nil {
+		t.Fatalf("MarkActiveTasksInterrupted: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("interrupted count = %d, want 2", count)
+	}
+
+	for _, issueNumber := range []int{1, 2} {
+		task, _ := s.GetTask("r", issueNumber)
+		if task.State != StateInterrupted {
+			t.Errorf("issue %d state = %q, want interrupted", issueNumber, task.State)
+		}
+		entries, _ := s.GetAuditLog("r", issueNumber)
+		if len(entries) != 1 || entries[0].Event != "interrupted" {
+			t.Errorf("issue %d audit = %#v, want interrupted event", issueNumber, entries)
+		}
+	}
+
+	ciTask, _ := s.GetTask("r", 3)
+	if ciTask.State != StateInProgress {
+		t.Errorf("CI-waiting task state = %q, want in-progress", ciTask.State)
+	}
+	waitingTask, _ := s.GetTask("r", 4)
+	if waitingTask.State != StateAwaitingFeedback {
+		t.Errorf("awaiting-feedback task state = %q", waitingTask.State)
+	}
+}
+
+func TestCountActiveIncludesRecovering(t *testing.T) {
+	s := openTestStore(t)
+	_, _ = s.UpsertTask("r", 1, StateRecovering, "session")
+
+	count, err := s.CountActive()
+	if err != nil {
+		t.Fatalf("CountActive: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("CountActive = %d, want 1 for recovering task", count)
 	}
 }
 

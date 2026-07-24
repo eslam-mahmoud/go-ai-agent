@@ -11,7 +11,6 @@ import (
 
 var (
 	ErrDiscoveryDecisionConflict = errors.New("discovery decision conflict")
-	ErrDiscoveryUnevaluated      = errors.New("discoveries remain unevaluated")
 )
 
 type DiscoveryDecisionRecord struct {
@@ -237,23 +236,6 @@ func discoveryDecisionsAlreadyApplied(
 		return false, fmt.Errorf("find recorded discovery decisions: %w", err)
 	}
 	return true, nil
-}
-
-// RequireEvaluatedDiscoveries enforces the plan's invariant that a manager
-// review cannot finish while discoveries remain unevaluated.
-func (s *Store) RequireEvaluatedDiscoveries(projectID int64) error {
-	pending, err := s.ListUnevaluatedDiscoveries(projectID)
-	if err != nil {
-		return err
-	}
-	if len(pending) == 0 {
-		return nil
-	}
-	ids := make([]int64, 0, len(pending))
-	for _, discovery := range pending {
-		ids = append(ids, discovery.ID)
-	}
-	return fmt.Errorf("%w: %v", ErrDiscoveryUnevaluated, ids)
 }
 
 func (s *Store) loadDiscoveries(ids []int64) ([]*domain.Discovery, error) {

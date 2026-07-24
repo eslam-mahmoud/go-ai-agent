@@ -2,6 +2,7 @@ package claude
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Result is the outcome of a claude invocation.
@@ -30,13 +32,13 @@ type TokenUsage struct {
 }
 
 type RunOptions struct {
-	WorkDir              string
-	SessionID            string // for new session (--session-id)
-	ResumeID             string // for resume (--resume)
-	MaxTurns             int
-	Timeout              time.Duration
-	Prompt               string
-	SkipPermissions      bool   // --dangerously-skip-permissions
+	WorkDir         string
+	SessionID       string // for new session (--session-id)
+	ResumeID        string // for resume (--resume)
+	MaxTurns        int
+	Timeout         time.Duration
+	Prompt          string
+	SkipPermissions bool // --dangerously-skip-permissions
 }
 
 type Runner interface {
@@ -46,6 +48,8 @@ type Runner interface {
 type cliRunner struct {
 	claudeBin string
 }
+
+const maxStderrBytes = 8 * 1024
 
 func New(claudeBin string) Runner {
 	if claudeBin == "" {
@@ -103,22 +107,94 @@ func (r *cliRunner) Run(ctx context.Context, opts RunOptions) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stderr pipe: %w", err)
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start claude: %w", err)
 	}
 
-	result, parseErr := parseStream(stdout)
-	waitErr := cmd.Wait()
+	stderrCapture := &limitedBuffer{limit: maxStderrBytes}
+	stderrDone := make(chan error, 1)
+	go func() {
+		_, copyErr := io.Copy(stderrCapture, stderr)
+		stderrDone <- copyErr
+	}()
 
+	result, parseErr := parseStream(stdout)
 	if parseErr != nil {
-		return nil, fmt.Errorf("parse stream: %w", parseErr)
+		_ = cmd.Process.Kill()
 	}
+	stderrErr := <-stderrDone
+	waitErr := cmd.Wait()
+	stderrText := sanitizeStderr(stderrCapture.String(), stderrCapture.truncated)
+
 	if waitErr != nil && cmdCtx.Err() == context.DeadlineExceeded {
-		return nil, fmt.Errorf("claude timed out after %s", opts.Timeout)
+		return nil, withStderr(
+			fmt.Sprintf("claude timed out after %s", opts.Timeout),
+			context.DeadlineExceeded,
+			stderrText,
+		)
 	}
-	// Non-zero exit is expected for error cases; result.IsError will be set.
+	if parseErr != nil {
+		return nil, withStderr("parse claude stream", parseErr, stderrText)
+	}
+	if waitErr != nil {
+		return nil, withStderr("claude process failed", waitErr, stderrText)
+	}
+	if stderrErr != nil {
+		return nil, fmt.Errorf("read claude stderr: %w", stderrErr)
+	}
 
 	return result, nil
+}
+
+type limitedBuffer struct {
+	buf       bytes.Buffer
+	limit     int
+	truncated bool
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	originalLen := len(p)
+	remaining := b.limit - b.buf.Len()
+	if remaining <= 0 {
+		b.truncated = b.truncated || originalLen > 0
+		return originalLen, nil
+	}
+	if len(p) > remaining {
+		p = p[:remaining]
+		b.truncated = true
+	}
+	_, _ = b.buf.Write(p)
+	return originalLen, nil
+}
+
+func (b *limitedBuffer) String() string {
+	return b.buf.String()
+}
+
+func sanitizeStderr(stderr string, truncated bool) string {
+	stderr = strings.ToValidUTF8(stderr, "\uFFFD")
+	stderr = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, stderr)
+	stderr = strings.Join(strings.Fields(stderr), " ")
+	if truncated {
+		stderr = strings.TrimSpace(stderr + " [truncated]")
+	}
+	return stderr
+}
+
+func withStderr(message string, cause error, stderr string) error {
+	if stderr == "" {
+		return fmt.Errorf("%s: %w", message, cause)
+	}
+	return fmt.Errorf("%s: %w; stderr: %s", message, cause, stderr)
 }
 
 func buildArgs(opts RunOptions) []string {

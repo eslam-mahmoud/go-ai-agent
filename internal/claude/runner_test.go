@@ -1,19 +1,26 @@
 package claude
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDetectClarification(t *testing.T) {
 	cases := []struct {
-		output      string
-		wantNeeds   bool
+		output       string
+		wantNeeds    bool
 		wantQuestion string
 	}{
 		{
-			output:    "NEEDS_CLARIFICATION: Should I use per-IP or per-user rate limiting?",
-			wantNeeds: true,
+			output:       "NEEDS_CLARIFICATION: Should I use per-IP or per-user rate limiting?",
+			wantNeeds:    true,
 			wantQuestion: "Should I use per-IP or per-user rate limiting?",
 		},
 		{
@@ -21,8 +28,8 @@ func TestDetectClarification(t *testing.T) {
 			wantNeeds: false,
 		},
 		{
-			output:    "NEEDS_CLARIFICATION:   What is the timeout value?  ",
-			wantNeeds: true,
+			output:       "NEEDS_CLARIFICATION:   What is the timeout value?  ",
+			wantNeeds:    true,
 			wantQuestion: "What is the timeout value?",
 		},
 		{
@@ -183,6 +190,120 @@ also not json
 	}
 }
 
+func TestCLIRunner_rejectsNonZeroExitAndIncludesStderr(t *testing.T) {
+	bin := writeFakeClaude(t,
+		`{"type":"result","subtype":"success","is_error":false,"result":"looks successful"}`,
+		"provider authentication failed",
+		23,
+	)
+
+	result, err := New(bin).Run(context.Background(), RunOptions{
+		WorkDir: t.TempDir(),
+		Prompt:  "test",
+		Timeout: 5 * time.Second,
+	})
+	if err == nil {
+		t.Fatal("Run returned nil error for non-zero provider exit")
+	}
+	if result != nil {
+		t.Errorf("Run result = %#v, want nil on non-zero provider exit", result)
+	}
+	if !strings.Contains(err.Error(), "exit status 23") {
+		t.Errorf("error %q does not include exit status", err)
+	}
+	if !strings.Contains(err.Error(), "provider authentication failed") {
+		t.Errorf("error %q does not include provider stderr", err)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Errorf("error %T does not wrap *exec.ExitError", err)
+	}
+}
+
+func TestCLIRunner_rejectsNonZeroExitWithoutStderr(t *testing.T) {
+	bin := writeFakeClaude(t, "", "", 7)
+
+	result, err := New(bin).Run(context.Background(), RunOptions{
+		WorkDir: t.TempDir(),
+		Prompt:  "test",
+		Timeout: 5 * time.Second,
+	})
+	if err == nil {
+		t.Fatal("Run returned nil error for non-zero provider exit")
+	}
+	if result != nil {
+		t.Errorf("Run result = %#v, want nil on non-zero provider exit", result)
+	}
+	if !strings.Contains(err.Error(), "exit status 7") {
+		t.Errorf("error %q does not include exit status", err)
+	}
+}
+
+func TestCLIRunner_zeroExitWithResultSucceeds(t *testing.T) {
+	bin := writeFakeClaude(t,
+		`{"type":"result","subtype":"success","is_error":false,"result":"completed","session_id":"session-1"}`,
+		"",
+		0,
+	)
+
+	result, err := New(bin).Run(context.Background(), RunOptions{
+		WorkDir: t.TempDir(),
+		Prompt:  "test",
+		Timeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Run returned error for successful provider exit: %v", err)
+	}
+	if result == nil {
+		t.Fatal("Run result is nil")
+	}
+	if result.Output != "completed" {
+		t.Errorf("Output = %q, want completed", result.Output)
+	}
+}
+
+func TestCLIRunner_timeoutRemainsDistinguishable(t *testing.T) {
+	bin := writeFakeClaudeScript(t, "while :; do :; done\n")
+
+	result, err := New(bin).Run(context.Background(), RunOptions{
+		WorkDir: t.TempDir(),
+		Prompt:  "test",
+		Timeout: 50 * time.Millisecond,
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run error = %v, want context deadline exceeded", err)
+	}
+	if result != nil {
+		t.Errorf("Run result = %#v, want nil on timeout", result)
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error %q does not identify timeout", err)
+	}
+}
+
+func TestLimitedStderrCaptureIsBoundedAndSanitized(t *testing.T) {
+	capture := &limitedBuffer{limit: 16}
+	raw := "bad\x00line\n" + strings.Repeat("x", 32)
+	if _, err := capture.Write([]byte(raw)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	if capture.buf.Len() != 16 {
+		t.Fatalf("captured bytes = %d, want 16", capture.buf.Len())
+	}
+	if !capture.truncated {
+		t.Fatal("capture should report truncation")
+	}
+
+	got := sanitizeStderr(capture.String(), capture.truncated)
+	if strings.ContainsAny(got, "\x00\n\r\t") {
+		t.Errorf("sanitized stderr still contains control characters: %q", got)
+	}
+	if !strings.HasSuffix(got, "[truncated]") {
+		t.Errorf("sanitized stderr = %q, want truncation marker", got)
+	}
+}
+
 func TestBuildFirstRunPrompt(t *testing.T) {
 	prompt := BuildFirstRunPrompt("Add rate limiting", "Per-IP, 5/min", "some comments", 42, 0)
 	if !strings.Contains(prompt, "Add rate limiting") {
@@ -277,4 +398,34 @@ func assertContainsSeq(t *testing.T, args []string, key, val string) {
 		}
 	}
 	t.Errorf("args %v does not contain sequence [%q, %q]", args, key, val)
+}
+
+func writeFakeClaude(t *testing.T, stdout, stderr string, exitCode int) string {
+	t.Helper()
+
+	var script string
+	if stdout != "" {
+		script += fmt.Sprintf("printf '%%s\\n' %s\n", shellQuote(stdout))
+	}
+	if stderr != "" {
+		script += fmt.Sprintf("printf '%%s\\n' %s >&2\n", shellQuote(stderr))
+	}
+	script += fmt.Sprintf("exit %d\n", exitCode)
+
+	return writeFakeClaudeScript(t, script)
+}
+
+func writeFakeClaudeScript(t *testing.T, body string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "fake-claude")
+	script := "#!/bin/sh\n" + body
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake Claude binary: %v", err)
+	}
+	return path
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }

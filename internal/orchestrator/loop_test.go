@@ -74,6 +74,9 @@ func (f *fakeGitHub) MergePullRequest(_ context.Context, _, _ string, _ int, _ s
 func (f *fakeGitHub) CreateIssue(_ context.Context, _, _, _, _ string, _ []string) (*githubclient.Issue, error) {
 	return &githubclient.Issue{Number: 99, HTMLURL: "https://github.com/owner/repo/issues/99"}, nil
 }
+func (f *fakeGitHub) UpdateIssueBody(_ context.Context, _, _ string, number int, body string) (*githubclient.Issue, error) {
+	return &githubclient.Issue{Number: number, Body: body}, nil
+}
 func (f *fakeGitHub) CloseIssue(_ context.Context, _, _ string, _ int) error { return nil }
 
 type fakeRunner struct {

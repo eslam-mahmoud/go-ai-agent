@@ -2,6 +2,7 @@
 package projectcli
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,7 +15,9 @@ import (
 
 	"github.com/eslam-mahmoud/go-ai-agent/internal/config"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/domain"
+	githubclient "github.com/eslam-mahmoud/go-ai-agent/internal/github"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/projectfiles"
+	"github.com/eslam-mahmoud/go-ai-agent/internal/projectissue"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/store"
 )
 
@@ -47,6 +50,15 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return runListTasks(args[1:], stdout, stderr)
 	case "sync-files":
 		return runSyncFiles(args[1:], stdout, stderr)
+	case "sync-issue":
+		return runSyncIssue(
+			args[1:],
+			stdout,
+			stderr,
+			func(token string) projectissue.Client {
+				return githubclient.New(token)
+			},
+		)
 	case "help", "-h", "--help":
 		printUsage(stdout)
 		return nil
@@ -64,6 +76,7 @@ func runCreate(args []string, stdout, stderr io.Writer) error {
 	goal := fs.String("goal", "", "project goal")
 	scope := fs.String("scope", "", "project scope")
 	releaseTarget := fs.String("release-target", "", "optional release target")
+	parentIssue := fs.Int("parent-issue", 0, "optional existing parent issue number")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -92,6 +105,7 @@ func runCreate(args []string, stdout, stderr io.Writer) error {
 		strings.TrimSpace(*scope),
 	)
 	project.ReleaseTarget = strings.TrimSpace(*releaseTarget)
+	project.ParentIssueNumber = *parentIssue
 	created, err := s.CreateProject(project)
 	if err != nil {
 		return err
@@ -293,6 +307,86 @@ func runSyncFiles(args []string, stdout, stderr io.Writer) error {
 	return nil
 }
 
+type issueClientFactory func(token string) projectissue.Client
+
+func runSyncIssue(
+	args []string,
+	stdout, stderr io.Writer,
+	newClient issueClientFactory,
+) error {
+	fs := newFlagSet("project sync-issue", stderr)
+	cfgFlags := addConfigFlags(fs)
+	repo := fs.String("repo", "", "project repository identity")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if err := requireValues(requiredValue{"repo", *repo}); err != nil {
+		return err
+	}
+
+	cfg, err := loadConfig(cfgFlags)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(cfg.GitHub.Token) == "" {
+		return errors.New("GITHUB_TOKEN is required for project sync-issue")
+	}
+	s, err := store.Open(cfg.DBPath)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	project, err := requireProject(s, *repo)
+	if err != nil {
+		return err
+	}
+	tasks, err := s.ListProjectTasks(project.ID)
+	if err != nil {
+		return err
+	}
+	review, err := s.LatestManagerReview(project.ID)
+	if err != nil {
+		return err
+	}
+
+	repoParts := strings.Split(project.Repo, "/")
+	result, err := projectissue.Sync(
+		context.Background(),
+		newClient(cfg.GitHub.Token),
+		repoParts[0],
+		repoParts[1],
+		project,
+		tasks,
+		review,
+	)
+	if err != nil {
+		return err
+	}
+	if result == nil || result.Issue == nil || result.Issue.Number <= 0 {
+		return errors.New("sync parent project issue returned no issue number")
+	}
+	if result.Created {
+		project.ParentIssueNumber = result.Issue.Number
+		if _, err := s.UpdateProject(project); err != nil {
+			return fmt.Errorf("persist parent project issue number: %w", err)
+		}
+		fmt.Fprintf(
+			stdout,
+			"created parent project issue #%d: %s\n",
+			result.Issue.Number,
+			result.Issue.HTMLURL,
+		)
+		return nil
+	}
+	fmt.Fprintf(
+		stdout,
+		"updated parent project issue #%d: %s\n",
+		result.Issue.Number,
+		result.Issue.HTMLURL,
+	)
+	return nil
+}
+
 func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -446,6 +540,7 @@ func printUsage(w io.Writer) {
   madar project add-task --repo owner/name --title TITLE --goal GOAL [options]
   madar project list-tasks --repo owner/name [options]
   madar project sync-files --repo owner/name [options]
+  madar project sync-issue --repo owner/name [options]
 
 Every subcommand accepts --config and --env.`)
 }

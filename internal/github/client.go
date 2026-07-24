@@ -45,6 +45,7 @@ type Client interface {
 	MergePullRequest(ctx context.Context, owner, repo string, prNumber int, method string) error
 	// CreateIssue opens a new issue with the given title, body, and labels.
 	CreateIssue(ctx context.Context, owner, repo, title, body string, labels []string) (*Issue, error)
+	UpdateIssueBody(ctx context.Context, owner, repo string, number int, body string) (*Issue, error)
 	CloseIssue(ctx context.Context, owner, repo string, number int) error
 }
 
@@ -110,8 +111,8 @@ func (c *githubClient) GetAuthenticatedUsername(ctx context.Context) (string, er
 
 func (c *githubClient) ListReadyIssues(ctx context.Context, owner, repo, readyLabel string) ([]*Issue, error) {
 	opts := &gh.IssueListByRepoOptions{
-		State:  "open",
-		Labels: []string{readyLabel},
+		State:       "open",
+		Labels:      []string{readyLabel},
 		ListOptions: gh.ListOptions{PerPage: 100},
 	}
 	var issues []*Issue
@@ -144,9 +145,9 @@ func (c *githubClient) GetIssue(ctx context.Context, owner, repo string, number 
 
 func (c *githubClient) GetComments(ctx context.Context, owner, repo string, number int, since *time.Time) ([]*Comment, error) {
 	opts := &gh.IssueListCommentsOptions{
-		Sort:      gh.String("created"),
-		Direction: gh.String("asc"),
-		Since:     since,
+		Sort:        gh.String("created"),
+		Direction:   gh.String("asc"),
+		Since:       since,
 		ListOptions: gh.ListOptions{PerPage: 100},
 	}
 	var comments []*Comment
@@ -230,6 +231,21 @@ func (c *githubClient) CreateIssue(ctx context.Context, owner, repo, title, body
 	i, _, err := c.gh.Issues.Create(ctx, owner, repo, req)
 	if err != nil {
 		return nil, fmt.Errorf("create issue: %w", err)
+	}
+	return toIssue(i), nil
+}
+
+func (c *githubClient) UpdateIssueBody(
+	ctx context.Context,
+	owner, repo string,
+	number int,
+	body string,
+) (*Issue, error) {
+	i, _, err := c.gh.Issues.Edit(ctx, owner, repo, number, &gh.IssueRequest{
+		Body: gh.String(body),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("update issue %d body: %w", number, err)
 	}
 	return toIssue(i), nil
 }

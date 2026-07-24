@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "summary",
+    "question",
+    "discoveries",
+    "risks",
+    "recommended_next_action",
+    "components",
+    "decisions",
+    "dependencies",
+    "recommended_tasks",
+    "addressed_discovery_ids",
+    "architecture_summary"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["completed", "needs_input", "blocked", "failed"]
+    },
+    "summary": {"type": "string", "minLength": 1},
+    "question": {"type": ["string", "null"]},
+    "discoveries": {"type": "array", "items": {"type": "object"}},
+    "risks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "impact"],
+        "properties": {
+          "title": {"type": "string", "minLength": 1},
+          "impact": {"type": "string", "minLength": 1},
+          "components": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "recommended_next_action": {"type": "string"},
+    "components": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "responsibility"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "responsibility": {"type": "string", "minLength": 1},
+          "depends_on": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "decision", "rationale"],
+        "properties": {
+          "title": {"type": "string", "minLength": 1},
+          "decision": {"type": "string", "minLength": 1},
+          "rationale": {"type": "string", "minLength": 1},
+          "alternatives": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          },
+          "consequences": {"type": "string"}
+        }
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["from", "to", "reason"],
+        "properties": {
+          "from": {"type": "string", "minLength": 1},
+          "to": {"type": "string", "minLength": 1},
+          "reason": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "recommended_tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "goal", "reason"],
+        "properties": {
+          "title": {"type": "string", "minLength": 1},
+          "goal": {"type": "string", "minLength": 1},
+          "reason": {"type": "string", "minLength": 1},
+          "blocks_release": {"type": "boolean"}
+        }
+      }
+    },
+    "addressed_discovery_ids": {
+      "type": "array",
+      "items": {"type": "integer", "minimum": 1},
+      "uniqueItems": true
+    },
+    "architecture_summary": {"type": "string", "minLength": 1}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "needs_input"}}},
+      "then": {"properties": {"question": {"type": "string", "minLength": 1}}},
+      "else": {"properties": {"question": {"type": "null"}}}
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 package project
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -245,4 +246,93 @@ func (fixture *reviewFixture) resolveDiscovery(
 	}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestArchitectureControllerRunsArchitectOverTheTriggeringRisks(t *testing.T) {
+	t.Parallel()
+	fixture := newReviewFixture(t)
+	risk := fixture.architectureRiskDiscovery(t, "Cross-cutting cache change")
+	runner := &fakeArchitectRunner{
+		output: []byte(`{"status":"completed","architecture_summary":"one writer"}`),
+	}
+	controller, err := NewArchitectureControllerWithRunner(fixture.store, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assessment, proposal, err := controller.RunArchitect(
+		context.Background(), fixture.projectID,
+	)
+	if err != nil {
+		t.Fatalf("RunArchitect: %v", err)
+	}
+	if !assessment.Required || len(proposal) == 0 {
+		t.Fatalf("assessment = %#v, proposal = %s", assessment, proposal)
+	}
+	if runner.calls != 1 || len(runner.lastIDs) != 1 || runner.lastIDs[0] != risk.ID {
+		t.Fatalf("runner calls=%d ids=%v", runner.calls, runner.lastIDs)
+	}
+}
+
+func TestArchitectureControllerSkipsTheRunWhenNothingIsOwed(t *testing.T) {
+	t.Parallel()
+	fixture := newReviewFixture(t)
+	runner := &fakeArchitectRunner{output: []byte(`{"status":"completed"}`)}
+	controller, err := NewArchitectureControllerWithRunner(fixture.store, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assessment, proposal, err := controller.RunArchitect(
+		context.Background(), fixture.projectID,
+	)
+	if err != nil {
+		t.Fatalf("RunArchitect: %v", err)
+	}
+	if assessment.Required || proposal != nil || runner.calls != 0 {
+		t.Fatalf("assessment = %#v, runner calls = %d", assessment, runner.calls)
+	}
+}
+
+func TestArchitectureControllerSurfacesArchitectFailures(t *testing.T) {
+	t.Parallel()
+	fixture := newReviewFixture(t)
+	fixture.architectureRiskDiscovery(t, "Cross-cutting cache change")
+	runner := &fakeArchitectRunner{err: errors.New("engine unavailable")}
+	controller, err := NewArchitectureControllerWithRunner(fixture.store, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := controller.RunArchitect(
+		context.Background(), fixture.projectID,
+	); err == nil {
+		t.Fatal("architect failure reported success")
+	}
+	// Without a runner the obligation is still raised and reported.
+	plain := fixture.architectureController(t)
+	assessment, proposal, err := plain.RunArchitect(context.Background(), fixture.projectID)
+	if err != nil {
+		t.Fatalf("RunArchitect without runner: %v", err)
+	}
+	if !assessment.Required || proposal != nil {
+		t.Fatalf("assessment = %#v, proposal = %s", assessment, proposal)
+	}
+}
+
+type fakeArchitectRunner struct {
+	output  json.RawMessage
+	err     error
+	calls   int
+	lastIDs []int64
+}
+
+func (fake *fakeArchitectRunner) RunArchitect(
+	_ context.Context,
+	_ int64,
+	outstandingDiscoveryIDs []int64,
+) (json.RawMessage, error) {
+	fake.calls++
+	fake.lastIDs = outstandingDiscoveryIDs
+	if fake.err != nil {
+		return nil, fake.err
+	}
+	return fake.output, nil
 }

@@ -17,6 +17,7 @@ const (
 	ModeFixer     ModeName = "fixer"
 	ModeVerifier  ModeName = "verifier"
 	ModeManager   ModeName = "manager"
+	ModeArchitect ModeName = "architect"
 )
 
 type ModeStatus string

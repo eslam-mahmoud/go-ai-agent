@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -23,7 +24,13 @@ func TestAdapterContractAndCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := engine.CapabilitySet{Resume: true, Streaming: true, Usage: true}
+	want := engine.CapabilitySet{
+		Resume:           true,
+		StructuredOutput: true,
+		Streaming:        true,
+		Usage:            true,
+		OutputSchema:     true,
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Capabilities = %#v, want %#v", got, want)
 	}
@@ -34,7 +41,7 @@ func TestBuildArgsRunAndResume(t *testing.T) {
 		Prompt: "do work", Model: "gpt-test", ResumeSessionID: "thread-1",
 		Policy: engine.Policy{Sandbox: "workspace-write", ApprovalPolicy: "never"},
 	}
-	run := buildArgs(request, false)
+	run := buildArgs(request, false, "")
 	assertSequence(t, run, "exec", "--json")
 	assertSequence(t, run, "--model", "gpt-test")
 	assertSequence(t, run, "--sandbox", "workspace-write")
@@ -43,13 +50,13 @@ func TestBuildArgsRunAndResume(t *testing.T) {
 		t.Errorf("run args = %v", run)
 	}
 
-	resume := buildArgs(request, true)
+	resume := buildArgs(request, true, "")
 	assertSequence(t, resume, "exec", "resume")
 	assertContains(t, resume, `sandbox_mode="workspace-write"`)
 	assertSequence(t, resume, "thread-1", "do work")
 
 	request.Policy.SkipPermissions = true
-	bypass := buildArgs(request, false)
+	bypass := buildArgs(request, false, "")
 	assertContains(t, bypass, "--dangerously-bypass-approvals-and-sandbox")
 	if contains(bypass, "--sandbox") || contains(bypass, `approval_policy="never"`) {
 		t.Errorf("bypass args include conflicting policy flags: %v", bypass)
@@ -153,7 +160,10 @@ func TestAdapterProcessGuarantees(t *testing.T) {
 	t.Run("nonzero emits no terminal", func(t *testing.T) {
 		bin := fakeScript(t, "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}' '{\"type\":\"turn.completed\"}'\nexit 9\n")
 		var events []engine.Event
-		result, err := New(bin).Run(context.Background(), engine.RunRequest{WorkDir: t.TempDir()}, func(event engine.Event) error {
+		result, err := New(bin).Run(context.Background(), engine.RunRequest{
+			WorkDir:      t.TempDir(),
+			OutputSchema: json.RawMessage(`{"type":"object"}`),
+		}, func(event engine.Event) error {
 			events = append(events, event)
 			return nil
 		})
@@ -170,7 +180,10 @@ func TestAdapterProcessGuarantees(t *testing.T) {
 	t.Run("provider failure emits failed after zero exit", func(t *testing.T) {
 		bin := fakeScript(t, "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-2\"}' '{\"type\":\"turn.failed\",\"error\":{\"message\":\"model failed\"}}'\n")
 		var events []engine.Event
-		result, err := New(bin).Run(context.Background(), engine.RunRequest{WorkDir: t.TempDir()}, func(event engine.Event) error {
+		result, err := New(bin).Run(context.Background(), engine.RunRequest{
+			WorkDir:      t.TempDir(),
+			OutputSchema: json.RawMessage(`{"type":"object"}`),
+		}, func(event engine.Event) error {
 			events = append(events, event)
 			return nil
 		})
@@ -233,11 +246,152 @@ func TestAdapterValidationAndClassification(t *testing.T) {
 	if _, err := New("/bin/sh").Run(ctx, engine.RunRequest{WorkDir: t.TempDir()}, nil); !errors.Is(err, context.Canceled) || engine.ClassOf(err) != engine.ErrorCancelled {
 		t.Errorf("cancellation error = %v, class = %s", err, engine.ClassOf(err))
 	}
-	if _, err := New("/bin/sh").Run(context.Background(), engine.RunRequest{OutputSchema: []byte(`{}`)}, nil); engine.ClassOf(err) != engine.ErrorPolicyDenied {
-		t.Errorf("schema class = %s", engine.ClassOf(err))
+	if _, err := New("/bin/sh").Run(context.Background(), engine.RunRequest{OutputSchema: []byte(`{`)}, nil); engine.ClassOf(err) != engine.ErrorPolicyDenied {
+		t.Errorf("invalid schema class = %s", engine.ClassOf(err))
 	}
 	if err := New("/bin/sh").Cancel(context.Background(), "run-1"); err == nil {
 		t.Error("Cancel returned nil")
+	}
+}
+
+func TestAdapterValidatesStructuredOutputAndRemovesSchemaFile(t *testing.T) {
+	argsPath := filepath.Join(t.TempDir(), "args")
+	schemaPathCapture := filepath.Join(t.TempDir(), "schema-path")
+	bin := fakeScript(t, `
+printf '%s\n' "$@" > "$CAPTURE_ARGS"
+previous=""
+for argument in "$@"; do
+  if [ "$previous" = "--output-schema" ]; then
+    printf '%s' "$argument" > "$CAPTURE_SCHEMA_PATH"
+    test -s "$argument" || exit 12
+  fi
+  previous="$argument"
+done
+printf '%s\n' '{"type":"thread.started","thread_id":"thread-json"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"status\":\"completed\",\"count\":2}"}}'
+printf '%s\n' '{"type":"turn.completed"}'
+`)
+	schema := json.RawMessage(`{
+		"$schema":"https://json-schema.org/draft/2020-12/schema",
+		"type":"object",
+		"properties":{"status":{"const":"completed"},"count":{"type":"integer"}},
+		"required":["status","count"],
+		"additionalProperties":false
+	}`)
+	result, err := New(bin).Run(context.Background(), engine.RunRequest{
+		WorkDir:      t.TempDir(),
+		Prompt:       "return JSON",
+		OutputSchema: schema,
+		Environment: map[string]string{
+			"CAPTURE_ARGS":        argsPath,
+			"CAPTURE_SCHEMA_PATH": schemaPathCapture,
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if string(result.OutputJSON) != `{"status":"completed","count":2}` {
+		t.Errorf("OutputJSON = %s", result.OutputJSON)
+	}
+	args, _ := os.ReadFile(argsPath)
+	if !strings.Contains(string(args), "--output-schema\n") {
+		t.Errorf("args = %q", args)
+	}
+	schemaPathBytes, _ := os.ReadFile(schemaPathCapture)
+	schemaPath := string(schemaPathBytes)
+	if schemaPath == "" {
+		t.Fatal("schema path was not captured")
+	}
+	if _, err := os.Stat(schemaPath); !os.IsNotExist(err) {
+		t.Errorf("temporary schema still exists: %s (err=%v)", schemaPath, err)
+	}
+}
+
+func TestAdapterRejectsStructuredMismatchWithoutTerminalEvent(t *testing.T) {
+	bin := fakeScript(t, `
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"count\":\"two\"}"}}'
+printf '%s\n' '{"type":"turn.completed"}'
+`)
+	var events []engine.Event
+	result, err := New(bin).Run(context.Background(), engine.RunRequest{
+		WorkDir:      t.TempDir(),
+		OutputSchema: json.RawMessage(`{"type":"object","properties":{"count":{"type":"integer"}},"required":["count"]}`),
+	}, func(event engine.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if result != nil || engine.ClassOf(err) != engine.ErrorInvalidOutput {
+		t.Fatalf("result = %#v, error = %v", result, err)
+	}
+	for _, event := range events {
+		if event.Type == engine.EventCompleted || event.Type == engine.EventFailed {
+			t.Errorf("invalid output emitted terminal event: %#v", event)
+		}
+	}
+}
+
+func TestAdapterRemovesSchemaFileOnFailurePaths(t *testing.T) {
+	schema := json.RawMessage(`{"type":"object"}`)
+	cases := []struct {
+		name    string
+		binary  func(*testing.T) string
+		context func() context.Context
+	}{
+		{
+			name:   "cancelled before start",
+			binary: func(*testing.T) string { return "/bin/sh" },
+			context: func() context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx
+			},
+		},
+		{
+			name: "nonzero exit",
+			binary: func(t *testing.T) string {
+				return fakeScript(t, "exit 7\n")
+			},
+			context: context.Background,
+		},
+		{
+			name: "invalid output",
+			binary: func(t *testing.T) string {
+				return fakeScript(t, "printf '%s\\n' '{\"type\":\"turn.completed\"}'\n")
+			},
+			context: context.Background,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			provider := &Adapter{binary: tc.binary(t), schemaTempDir: tempDir}
+			_, _ = provider.Run(tc.context(), engine.RunRequest{
+				WorkDir:      t.TempDir(),
+				OutputSchema: schema,
+			}, nil)
+			entries, err := os.ReadDir(tempDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Errorf("temporary schema files remain: %v", entries)
+			}
+		})
+	}
+}
+
+func TestAdapterInvalidSchemaDoesNotLaunchProvider(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "launched")
+	bin := fakeScript(t, "touch "+shellQuote(marker)+"\n")
+	result, err := New(bin).Run(context.Background(), engine.RunRequest{
+		WorkDir:      t.TempDir(),
+		OutputSchema: json.RawMessage(`{`),
+	}, nil)
+	if result != nil || engine.ClassOf(err) != engine.ErrorPolicyDenied {
+		t.Fatalf("result = %#v, error = %v", result, err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Errorf("provider launched for invalid schema (err=%v)", err)
 	}
 }
 

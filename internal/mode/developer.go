@@ -270,30 +270,18 @@ func (developer *Developer) validateContext(
 	case developmentContext.ExecutionID < 0:
 		return nil, fmt.Errorf("%w: execution ID cannot be negative", ErrInvalidDeveloperContext)
 	}
-	planResult := &engine.Result{
-		Status:     engine.ResultCompleted,
-		OutputJSON: append(json.RawMessage(nil), developmentContext.Plan...),
-	}
-	if err := developer.plannerValidator.ValidateResult(planResult); err != nil {
+	plan, _, err := validateCompletedModeArtifact(
+		developer.plannerValidator,
+		developmentContext.Plan,
+	)
+	if err != nil {
 		return nil, fmt.Errorf(
 			"%w: completed planner output is invalid: %v",
 			ErrInvalidDeveloperContext,
 			err,
 		)
 	}
-	var envelope Output
-	if err := json.Unmarshal(planResult.OutputJSON, &envelope); err != nil {
-		return nil, fmt.Errorf("%w: decode planner output: %v", ErrInvalidDeveloperContext, err)
-	}
-	if envelope.Status != OutputCompleted {
-		return nil, fmt.Errorf(
-			"%w: planner status must be %q, got %q",
-			ErrInvalidDeveloperContext,
-			OutputCompleted,
-			envelope.Status,
-		)
-	}
-	return append(json.RawMessage(nil), planResult.OutputJSON...), nil
+	return plan, nil
 }
 
 type developerPromptContext struct {

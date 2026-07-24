@@ -259,7 +259,8 @@ func TestReviewCoordinatorRunsWithoutPublisher(t *testing.T) {
 		t.Fatal(err)
 	}
 	coordinator, err := NewReviewCoordinator(
-		fixture.store, runner, discovery, backlog, selection, nil,
+		fixture.store, runner, discovery, backlog, selection,
+		ReviewCoordinatorOptions{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -298,7 +299,8 @@ func TestNewReviewCoordinatorRequiresCollaborators(t *testing.T) {
 	}
 	for _, test := range cases {
 		if _, err := NewReviewCoordinator(
-			test.store, test.runner, test.discovery, test.backlog, test.selection, nil,
+			test.store, test.runner, test.discovery, test.backlog, test.selection,
+			ReviewCoordinatorOptions{},
 		); err == nil {
 			t.Errorf("missing %s accepted", test.name)
 		}
@@ -350,11 +352,12 @@ func (fake *fakeManagerRunner) RunManagerReview(
 }
 
 type reviewFixture struct {
-	store         *store.Store
-	projectID     int64
-	tasks         []*domain.Task
-	workspaceRoot string
-	client        *fakeIssueClient
+	store           *store.Store
+	projectID       int64
+	tasks           []*domain.Task
+	workspaceRoot   string
+	client          *fakeIssueClient
+	discoveryClient *fakeDiscoveryIssueClient
 }
 
 func newReviewFixture(t *testing.T) *reviewFixture {
@@ -386,11 +389,12 @@ func newReviewFixture(t *testing.T) *reviewFixture {
 		t.Fatal(err)
 	}
 	return &reviewFixture{
-		store:         projectStore,
-		projectID:     projectRecord.ID,
-		tasks:         tasks,
-		workspaceRoot: workspaceRoot,
-		client:        &fakeIssueClient{nextNumber: 300},
+		store:           projectStore,
+		projectID:       projectRecord.ID,
+		tasks:           tasks,
+		workspaceRoot:   workspaceRoot,
+		client:          &fakeIssueClient{nextNumber: 300},
+		discoveryClient: &fakeDiscoveryIssueClient{nextNumber: 700},
 	}
 }
 
@@ -433,8 +437,26 @@ func (fixture *reviewFixture) coordinator(
 	if err != nil {
 		t.Fatal(err)
 	}
+	issues, err := NewDiscoveryIssuePublisher(fixture.store, fixture.discoveryClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	discoveryBacklog, err := NewDiscoveryBacklogController(fixture.store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	architecture, err := NewArchitectureController(fixture.store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	coordinator, err := NewReviewCoordinator(
-		fixture.store, runner, discovery, backlog, selection, publisher,
+		fixture.store, runner, discovery, backlog, selection,
+		ReviewCoordinatorOptions{
+			DiscoveryIssues:  issues,
+			DiscoveryBacklog: discoveryBacklog,
+			Architecture:     architecture,
+			Publisher:        publisher,
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -527,4 +549,80 @@ func (fixture *reviewFixture) reviewRaw(
 		t.Fatal(err)
 	}
 	return created
+}
+
+// TestReviewCycleCarriesADiscoveryAllTheWayToTheBacklog is the end-to-end
+// check the Milestone 6 audit was missing: the components existed and passed
+// in isolation while the loop never called them.
+func TestReviewCycleCarriesADiscoveryAllTheWayToTheBacklog(t *testing.T) {
+	t.Parallel()
+	fixture := newReviewFixture(t)
+	completed := fixture.completeFirstTask(t)
+	found := fixture.recordDiscoveries(t, "Retry budget is unbounded")
+
+	runner := &fakeManagerRunner{output: managerOutputJSON(map[string]any{
+		"discovery_decisions": []map[string]any{{
+			"discovery_id": found[0].ID,
+			"decision":     "create-next-task",
+			"reason":       "Blocks the MVP",
+		}},
+		"next_task": map[string]any{
+			"issue_number": fixture.tasks[2].IssueNumber,
+			"reason":       "Next dependency for the MVP",
+		},
+	})}
+	coordinator := fixture.coordinator(t, runner)
+
+	result, err := coordinator.ReviewAfterTask(
+		context.Background(), fixture.projectID, completed.ID,
+	)
+	if err != nil {
+		t.Fatalf("ReviewAfterTask: %v", err)
+	}
+	if result.Discoveries == nil || len(result.Discoveries.Decided) != 1 {
+		t.Fatalf("decisions = %#v", result.Discoveries)
+	}
+	if result.DiscoveryIssues == nil || len(result.DiscoveryIssues.Created) != 1 {
+		t.Fatalf("issues = %#v", result.DiscoveryIssues)
+	}
+	if result.DiscoveryBacklog == nil || len(result.DiscoveryBacklog.Inserted) != 1 {
+		t.Fatalf("backlog = %#v", result.DiscoveryBacklog)
+	}
+	queued := result.DiscoveryBacklog.Inserted[0]
+	if queued.IssueNumber != result.DiscoveryIssues.Created[0].CreatedIssueNumber {
+		t.Fatalf("queued task issue = %d", queued.IssueNumber)
+	}
+	if queued.Source != "discovery" ||
+		queued.SourceDiscoveryID == nil ||
+		*queued.SourceDiscoveryID != found[0].ID {
+		t.Fatalf("queued task = %#v", queued)
+	}
+	if result.Architecture == nil || result.Architecture.Required {
+		t.Fatalf("architecture = %#v", result.Architecture)
+	}
+
+	// The discovery is now real project work, not just a decision record.
+	tasks, err := fixture.store.ListProjectTasks(fixture.projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found2 *domain.Task
+	for _, task := range tasks {
+		if task.ID == queued.ID {
+			found2 = task
+		}
+	}
+	if found2 == nil {
+		t.Fatal("discovery task is missing from the backlog")
+	}
+	for index, task := range tasks {
+		if task.Sequence != index+1 {
+			t.Fatalf("task %d sequence = %d", task.ID, task.Sequence)
+		}
+	}
+	if remaining, _ := fixture.store.ListUnevaluatedDiscoveries(fixture.projectID); len(
+		remaining,
+	) != 0 {
+		t.Fatalf("%d discoveries remain unevaluated", len(remaining))
+	}
 }

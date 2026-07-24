@@ -35,27 +35,47 @@ type ReviewStore interface {
 }
 
 type ReviewResult struct {
-	Required    bool
-	Discoveries *DiscoveryDecisionResult
-	AlreadyDone bool
-	Review      *domain.ManagerReview
-	Backlog     *BacklogResult
-	Selection   *SelectionResult
-	Publication *PublicationResult
-	NoNextTask  bool
-	Question    string
+	Required         bool
+	Discoveries      *DiscoveryDecisionResult
+	DiscoveryIssues  *DiscoveryIssueResult
+	DiscoveryBacklog *DiscoveryBacklogResult
+	Architecture     *ArchitectureAssessment
+	AlreadyDone      bool
+	Review           *domain.ManagerReview
+	Backlog          *BacklogResult
+	Selection        *SelectionResult
+	Publication      *PublicationResult
+	NoNextTask       bool
+	Question         string
 }
 
 // ReviewCoordinator closes Madar's delivery loop. When a task reaches a
 // terminal outcome it runs Engineering Manager mode, persists the decision,
 // and applies it through the backlog, selection, and publication controllers.
 type ReviewCoordinator struct {
-	store     ReviewStore
-	runner    ManagerRunner
-	discovery *DiscoveryController
-	backlog   *BacklogController
-	selection *SelectionController
-	publisher *Publisher
+	store            ReviewStore
+	runner           ManagerRunner
+	discovery        *DiscoveryController
+	discoveryIssues  *DiscoveryIssuePublisher
+	discoveryBacklog *DiscoveryBacklogController
+	architecture     *ArchitectureController
+	backlog          *BacklogController
+	selection        *SelectionController
+	publisher        *Publisher
+}
+
+// ReviewCoordinatorOptions carries the stages that are optional because they
+// need credentials or are not configured in every deployment.
+type ReviewCoordinatorOptions struct {
+	// DiscoveryIssues files accepted discoveries as GitHub issues. Without it
+	// discoveries stay decided but unpublished, and none are queued.
+	DiscoveryIssues *DiscoveryIssuePublisher
+	// DiscoveryBacklog queues published discoveries.
+	DiscoveryBacklog *DiscoveryBacklogController
+	// Architecture reports outstanding architecture obligations.
+	Architecture *ArchitectureController
+	// Publisher mirrors the review onto the parent issue and project files.
+	Publisher *Publisher
 }
 
 // NewReviewCoordinator requires the backlog and selection controllers. The
@@ -67,7 +87,7 @@ func NewReviewCoordinator(
 	discovery *DiscoveryController,
 	backlog *BacklogController,
 	selection *SelectionController,
-	publisher *Publisher,
+	options ReviewCoordinatorOptions,
 ) (*ReviewCoordinator, error) {
 	switch {
 	case reviewStore == nil:
@@ -82,12 +102,15 @@ func NewReviewCoordinator(
 		return nil, errors.New("review coordinator selection controller is required")
 	}
 	return &ReviewCoordinator{
-		store:     reviewStore,
-		runner:    runner,
-		discovery: discovery,
-		backlog:   backlog,
-		selection: selection,
-		publisher: publisher,
+		store:            reviewStore,
+		runner:           runner,
+		discovery:        discovery,
+		discoveryIssues:  options.DiscoveryIssues,
+		discoveryBacklog: options.DiscoveryBacklog,
+		architecture:     options.Architecture,
+		backlog:          backlog,
+		selection:        selection,
+		publisher:        options.Publisher,
 	}, nil
 }
 
@@ -170,6 +193,32 @@ func (coordinator *ReviewCoordinator) applyDecisions(
 		return fmt.Errorf("apply manager discovery decisions: %w", err)
 	}
 	result.Discoveries = discoveries
+
+	// Accepted discoveries become issues and then backlog tasks before the
+	// backlog is reordered, so work found this cycle can be ordered and
+	// selected in the same cycle. Issues come first: a queued task must point
+	// at an issue that already exists.
+	if coordinator.discoveryIssues != nil {
+		issues, err := coordinator.discoveryIssues.PublishAcceptedDiscoveries(ctx, projectID)
+		if err != nil {
+			return err
+		}
+		result.DiscoveryIssues = issues
+	}
+	if coordinator.discoveryBacklog != nil {
+		queued, err := coordinator.discoveryBacklog.InsertAcceptedDiscoveries(projectID)
+		if err != nil {
+			return err
+		}
+		result.DiscoveryBacklog = queued
+	}
+	if coordinator.architecture != nil {
+		assessment, err := coordinator.architecture.Assess(projectID)
+		if err != nil {
+			return err
+		}
+		result.Architecture = assessment
+	}
 
 	backlog, err := coordinator.backlog.ApplyManagerReview(projectID, review.ID)
 	if err != nil {

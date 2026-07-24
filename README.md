@@ -478,6 +478,36 @@ sudo journalctl -fu madar   # follow logs
 | `-status` | — | Print active, interrupted, recovering, CI-watching, and awaiting-feedback tasks then exit |
 | `-update` | — | Check for a newer release, download it, and replace the running binary then exit |
 
+### Project commands
+
+Project commands manage the v2 project aggregate directly in the configured
+SQLite database. They do not require a GitHub token or an installed engine CLI.
+Pass `--config` and `--env` after the subcommand when using non-default paths.
+
+```bash
+# Register a repository.
+madar project create \
+  --repo owner/repository \
+  --name "Project name" \
+  --goal "Ship the next release" \
+  --scope "In-scope behavior and constraints" \
+  --release-target v2.0.0
+
+# Inspect registered projects and one project's complete state.
+madar project list
+madar project show --repo owner/repository
+
+# Append work to the ordered backlog and inspect it.
+madar project add-task \
+  --repo owner/repository \
+  --title "Implement the workflow" \
+  --goal "Run one project task from planning through delivery" \
+  --priority 10 \
+  --type feature \
+  --blocks-release
+madar project list-tasks --repo owner/repository
+```
+
 ---
 
 ## Project Structure

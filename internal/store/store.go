@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -75,6 +76,27 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// OpenReadOnly opens an existing database without migrations or mutating
+// pragmas. It is intended for status and diagnostic commands that must remain
+// usable while the daemon owns the exclusive instance lock.
+func OpenReadOnly(path string) (*Store, error) {
+	dsn := (&url.URL{
+		Scheme:   "file",
+		Path:     path,
+		RawQuery: "mode=ro",
+	}).String()
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open db read-only: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("open db read-only: %w", err)
+	}
+	return &Store{db: db}, nil
 }
 
 func (s *Store) Close() error {

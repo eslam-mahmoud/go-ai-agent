@@ -536,7 +536,12 @@ information such as the provider session ID is missing.
 Ensure `GITHUB_TOKEN` has `repo` scope. Madar uses authenticated HTTPS (`x-access-token` via environment variables — the token is never written to `.git/config`).
 
 ### Database locked errors
-Only one `madar` process should run at a time. Check for zombie processes: `pgrep -f madar`. WAL mode is enabled by default so brief concurrent reads are safe, but two writers will conflict.
+Daemon mode acquires `<db_path>.lock` before opening SQLite. A second daemon
+fails immediately and reports the PID recorded by the lock owner. Check that
+process with `ps -p <pid>`; do not delete the lock file while it is running.
+The file intentionally remains after shutdown and is reusable—the OS advisory
+lock, not file existence, determines ownership. `madar -status` opens SQLite
+read-only and remains available while the daemon is running.
 
 ### Check agent status
 ```bash

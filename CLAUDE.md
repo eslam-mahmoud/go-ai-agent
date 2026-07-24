@@ -45,7 +45,9 @@ When working on this repo via GitHub Issues, **always**:
 ## Key Invariants
 
 - **Single-writer SQLite.** `db.SetMaxOpenConns(1)` — never open a second
-  connection or run concurrent writes.
+  connection or run concurrent writes. Daemon mode must acquire the
+  `<db_path>.lock` instance lock before `store.Open`; `-status` uses
+  `store.OpenReadOnly` and does not take the daemon lock.
 - **Never commit `.env`.** Secrets live in `.env` (gitignored). The config
   split is `.env` for secrets, `config.yaml` for behaviour.
 - **Never commit `workspaces/`.** Cloned repos live under `workspaces/`

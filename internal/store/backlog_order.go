@@ -77,20 +77,32 @@ func (s *Store) ApplyProjectBacklogOrder(
 		return nil, err
 	}
 	now := time.Now().UTC()
-	temporaryBase := maxSequence + len(update.OrderedTaskIDs) + 1
+	// Only tasks whose position actually changes are rewritten. Targets are a
+	// permutation, so an unchanged task's sequence is never claimed by another
+	// row, and leaving it alone keeps its updated_at meaningful.
+	moved := make([]int64, 0, len(update.OrderedTaskIDs))
+	targets := make(map[int64]int, len(update.OrderedTaskIDs))
 	for index, id := range update.OrderedTaskIDs {
+		if current[index] == id {
+			continue
+		}
+		moved = append(moved, id)
+		targets[id] = index + 1
+	}
+	temporaryBase := maxSequence + len(update.OrderedTaskIDs) + 1
+	for offset, id := range moved {
 		if _, err := tx.Exec(`
 			UPDATE project_tasks SET sequence = ?, updated_at = ?
 			WHERE id = ? AND project_id = ?
-		`, temporaryBase+index, now, id, update.ProjectID); err != nil {
+		`, temporaryBase+offset, now, id, update.ProjectID); err != nil {
 			return nil, fmt.Errorf("stage manager backlog reorder: %w", err)
 		}
 	}
-	for index, id := range update.OrderedTaskIDs {
+	for _, id := range moved {
 		if _, err := tx.Exec(`
 			UPDATE project_tasks SET sequence = ?, updated_at = ?
 			WHERE id = ? AND project_id = ?
-		`, index+1, now, id, update.ProjectID); err != nil {
+		`, targets[id], now, id, update.ProjectID); err != nil {
 			return nil, fmt.Errorf("apply manager backlog reorder: %w", err)
 		}
 	}

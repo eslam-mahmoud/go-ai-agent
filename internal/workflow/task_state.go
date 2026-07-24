@@ -369,3 +369,18 @@ func transitionError(
 		Requirement: requirement,
 	}
 }
+
+// ManagerReviewRequired reports whether a terminal delivery outcome must be
+// evaluated by the Engineering Manager before the project moves on.
+//
+// Success, blockage, and cancellation all end a delivery attempt and require a
+// project-level decision. States that are still in flight, awaiting human
+// input, or already the product of a manager decision do not.
+func ManagerReviewRequired(status domain.TaskStatus) bool {
+	switch status {
+	case domain.TaskCompleted, domain.TaskBlocked, domain.TaskCancelled:
+		return true
+	default:
+		return false
+	}
+}

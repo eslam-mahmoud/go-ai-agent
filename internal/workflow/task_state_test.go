@@ -427,3 +427,30 @@ func passingEvidence(from, to domain.TaskStatus) TaskTransitionEvidence {
 	}
 	return evidence
 }
+
+func TestManagerReviewRequiredPerTerminalStatus(t *testing.T) {
+	required := map[domain.TaskStatus]bool{
+		domain.TaskCompleted:    true,
+		domain.TaskBlocked:      true,
+		domain.TaskCancelled:    true,
+		domain.TaskProposed:     false,
+		domain.TaskQueued:       false,
+		domain.TaskSelected:     false,
+		domain.TaskPlanning:     false,
+		domain.TaskWaitingInput: false,
+		domain.TaskDeveloping:   false,
+		domain.TaskReviewing:    false,
+		domain.TaskFixing:       false,
+		domain.TaskVerifying:    false,
+		domain.TaskWaitingCI:    false,
+		domain.TaskDeferred:     false,
+	}
+	for status, want := range required {
+		if got := ManagerReviewRequired(status); got != want {
+			t.Errorf("ManagerReviewRequired(%q) = %v, want %v", status, got, want)
+		}
+	}
+	if ManagerReviewRequired("unknown") {
+		t.Error("unknown status required a manager review")
+	}
+}

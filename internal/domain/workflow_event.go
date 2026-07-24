@@ -28,6 +28,7 @@ const (
 	WorkflowExecutionRetried     WorkflowEventType = "execution.retried"
 	WorkflowExecutionInterrupted WorkflowEventType = "execution.interrupted"
 	WorkflowRecoveryDecided      WorkflowEventType = "recovery.decided"
+	WorkflowBacklogReordered     WorkflowEventType = "backlog.reordered"
 )
 
 var ErrInvalidWorkflowEvent = errors.New("invalid workflow event")

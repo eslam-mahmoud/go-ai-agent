@@ -382,3 +382,47 @@ func assertTaskUnchanged(t *testing.T, s *Store, taskID int64, want domain.TaskS
 		t.Fatalf("task %d status = %q, want %q", taskID, task.Status, want)
 	}
 }
+
+func TestApplyProjectBacklogOrderLeavesUnmovedTasksUntouched(t *testing.T) {
+	s := openTestStore(t)
+	project, err := s.CreateProject(domain.NewProject("owner/order", "Madar", "Goal", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tasks []*domain.Task
+	for _, title := range []string{"First", "Second", "Third"} {
+		task := domain.NewTask(project.ID, title, title+" goal")
+		task.Status = domain.TaskQueued
+		created, err := s.CreateProjectTask(task)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tasks = append(tasks, created)
+	}
+	review := createSelectionReview(t, s, project.ID, 0, 0, "")
+	updated, err := s.ApplyProjectBacklogOrder(ProjectBacklogOrderUpdate{
+		ProjectID:       project.ID,
+		ManagerReviewID: review.ID,
+		ExpectedTaskIDs: []int64{tasks[0].ID, tasks[1].ID, tasks[2].ID},
+		OrderedTaskIDs:  []int64{tasks[0].ID, tasks[2].ID, tasks[1].ID},
+	})
+	if err != nil {
+		t.Fatalf("ApplyProjectBacklogOrder: %v", err)
+	}
+	if updated[0].ID != tasks[0].ID || updated[1].ID != tasks[2].ID || updated[2].ID != tasks[1].ID {
+		t.Fatalf("order = %d, %d, %d", updated[0].ID, updated[1].ID, updated[2].ID)
+	}
+	for index, task := range updated {
+		if task.Sequence != index+1 {
+			t.Fatalf("task %d sequence = %d", task.ID, task.Sequence)
+		}
+	}
+	if !updated[0].UpdatedAt.Equal(tasks[0].UpdatedAt) {
+		t.Fatal("unmoved task was rewritten")
+	}
+	for _, task := range updated[1:] {
+		if task.UpdatedAt.Equal(tasks[1].UpdatedAt) && task.UpdatedAt.Equal(tasks[2].UpdatedAt) {
+			t.Fatalf("moved task %d was not rewritten", task.ID)
+		}
+	}
+}

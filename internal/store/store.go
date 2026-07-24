@@ -389,11 +389,16 @@ var migrations = []struct {
 		CREATE TRIGGER artifacts_owner_update
 		BEFORE UPDATE OF project_id, task_id, execution_id ON artifacts
 		BEGIN
-			SELECT CASE WHEN NEW.task_id IS NOT NULL AND NOT EXISTS (
+			SELECT CASE WHEN NEW.task_id IS NOT NULL AND
+				(NEW.project_id IS NOT OLD.project_id OR
+				 NEW.task_id IS NOT OLD.task_id) AND NOT EXISTS (
 				SELECT 1 FROM project_tasks
 				WHERE id = NEW.task_id AND project_id = NEW.project_id
 			) THEN RAISE(ABORT, 'artifact task must belong to project') END;
-			SELECT CASE WHEN NEW.execution_id IS NOT NULL AND NOT EXISTS (
+			SELECT CASE WHEN NEW.execution_id IS NOT NULL AND
+				(NEW.project_id IS NOT OLD.project_id OR
+				 NEW.task_id IS NOT OLD.task_id OR
+				 NEW.execution_id IS NOT OLD.execution_id) AND NOT EXISTS (
 				SELECT 1 FROM executions
 				WHERE id = NEW.execution_id
 				  AND project_id = NEW.project_id
@@ -421,18 +426,124 @@ var migrations = []struct {
 		CREATE TRIGGER executions_artifacts_update
 		BEFORE UPDATE OF project_id, task_id, input_artifact_id, output_artifact_id ON executions
 		BEGIN
-			SELECT CASE WHEN NEW.input_artifact_id IS NOT NULL AND NOT EXISTS (
+			SELECT CASE WHEN NEW.input_artifact_id IS NOT NULL AND
+				(NEW.project_id IS NOT OLD.project_id OR
+				 NEW.task_id IS NOT OLD.task_id OR
+				 NEW.input_artifact_id IS NOT OLD.input_artifact_id) AND NOT EXISTS (
 				SELECT 1 FROM artifacts
 				WHERE id = NEW.input_artifact_id
 				  AND project_id = NEW.project_id
 				  AND (task_id IS NULL OR task_id = NEW.task_id)
 			) THEN RAISE(ABORT, 'input artifact must match execution project and task') END;
-			SELECT CASE WHEN NEW.output_artifact_id IS NOT NULL AND NOT EXISTS (
+			SELECT CASE WHEN NEW.output_artifact_id IS NOT NULL AND
+				(NEW.project_id IS NOT OLD.project_id OR
+				 NEW.task_id IS NOT OLD.task_id OR
+				 NEW.output_artifact_id IS NOT OLD.output_artifact_id) AND NOT EXISTS (
 				SELECT 1 FROM artifacts
 				WHERE id = NEW.output_artifact_id
 				  AND project_id = NEW.project_id
 				  AND (task_id IS NULL OR task_id = NEW.task_id)
 			) THEN RAISE(ABORT, 'output artifact must match execution project and task') END;
+		END;
+	`},
+	// v7: persist immutable Engineering Manager decisions and evidence.
+	{7, `
+		CREATE TABLE manager_reviews (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			completed_task_id INTEGER REFERENCES project_tasks(id) ON DELETE SET NULL,
+			execution_id INTEGER REFERENCES executions(id) ON DELETE SET NULL,
+			artifact_id INTEGER REFERENCES artifacts(id) ON DELETE SET NULL,
+			project_health TEXT NOT NULL CHECK (
+				project_health IN (
+					'on-track', 'at-risk', 'off-track', 'blocked', 'ready-for-release'
+				)
+			),
+			progress_estimate INTEGER NOT NULL CHECK (
+				progress_estimate >= 0 AND progress_estimate <= 100
+			),
+			completed_task_decision TEXT NOT NULL CHECK (
+				completed_task_decision IN ('accepted', 'rejected', 'deferred', 'not-applicable')
+			),
+			architecture_review_required INTEGER NOT NULL CHECK (
+				architecture_review_required IN (0, 1)
+			),
+			human_approval_required INTEGER NOT NULL CHECK (
+				human_approval_required IN (0, 1)
+			),
+			discovery_decisions TEXT NOT NULL CHECK (
+				length(CAST(discovery_decisions AS BLOB)) <= 1048576 AND
+				json_valid(discovery_decisions) AND
+				json_type(discovery_decisions) = 'array'
+			),
+			backlog_changes TEXT NOT NULL CHECK (
+				length(CAST(backlog_changes AS BLOB)) <= 1048576 AND
+				json_valid(backlog_changes) AND
+				json_type(backlog_changes) = 'array'
+			),
+			next_task_id INTEGER REFERENCES project_tasks(id) ON DELETE SET NULL,
+			next_task_issue_number INTEGER NOT NULL DEFAULT 0 CHECK (
+				next_task_issue_number >= 0
+			),
+			next_task_reason TEXT NOT NULL DEFAULT '',
+			release_readiness TEXT NOT NULL CHECK (length(trim(release_readiness)) > 0),
+			owner_update TEXT NOT NULL CHECK (length(trim(owner_update)) > 0),
+			reviewed_at DATETIME NOT NULL
+		);
+		CREATE INDEX idx_manager_reviews_project
+			ON manager_reviews(project_id, id);
+		CREATE INDEX idx_manager_reviews_reviewed
+			ON manager_reviews(project_id, reviewed_at, id);
+
+		CREATE TRIGGER manager_reviews_owner_insert
+		BEFORE INSERT ON manager_reviews
+		BEGIN
+			SELECT CASE WHEN NEW.completed_task_id IS NOT NULL AND NOT EXISTS (
+				SELECT 1 FROM project_tasks
+					WHERE id = NEW.completed_task_id AND project_id = NEW.project_id
+			) THEN RAISE(ABORT, 'completed task must belong to review project') END;
+			SELECT CASE WHEN NEW.execution_id IS NOT NULL AND NOT EXISTS (
+				SELECT 1 FROM executions
+					WHERE id = NEW.execution_id AND project_id = NEW.project_id
+			) THEN RAISE(ABORT, 'execution must belong to review project') END;
+			SELECT CASE WHEN NEW.artifact_id IS NOT NULL AND NOT EXISTS (
+				SELECT 1 FROM artifacts
+					WHERE id = NEW.artifact_id AND project_id = NEW.project_id
+			) THEN RAISE(ABORT, 'artifact must belong to review project') END;
+			SELECT CASE WHEN NEW.next_task_id IS NOT NULL AND NOT EXISTS (
+				SELECT 1 FROM project_tasks
+					WHERE id = NEW.next_task_id AND project_id = NEW.project_id
+			) THEN RAISE(ABORT, 'next task must belong to review project') END;
+		END;
+
+		CREATE TRIGGER manager_reviews_owner_update
+		BEFORE UPDATE OF project_id, completed_task_id, execution_id, artifact_id, next_task_id
+		ON manager_reviews
+		BEGIN
+			SELECT CASE WHEN NEW.completed_task_id IS NOT NULL AND
+				(NEW.project_id IS NOT OLD.project_id OR
+				 NEW.completed_task_id IS NOT OLD.completed_task_id) AND NOT EXISTS (
+				SELECT 1 FROM project_tasks
+				WHERE id = NEW.completed_task_id AND project_id = NEW.project_id
+			) THEN RAISE(ABORT, 'completed task must belong to review project') END;
+			SELECT CASE WHEN NEW.execution_id IS NOT NULL AND
+				(NEW.project_id IS NOT OLD.project_id OR
+				 NEW.execution_id IS NOT OLD.execution_id) AND NOT EXISTS (
+				SELECT 1 FROM executions
+				WHERE id = NEW.execution_id AND project_id = NEW.project_id
+			) THEN RAISE(ABORT, 'execution must belong to review project') END;
+			SELECT CASE WHEN NEW.artifact_id IS NOT NULL AND
+				(NEW.project_id IS NOT OLD.project_id OR
+				 NEW.artifact_id IS NOT OLD.artifact_id) AND NOT EXISTS (
+				SELECT 1 FROM artifacts
+				WHERE id = NEW.artifact_id AND project_id = NEW.project_id
+			) THEN RAISE(ABORT, 'artifact must belong to review project') END;
+			SELECT CASE WHEN NEW.next_task_id IS NOT NULL AND
+				(NEW.project_id IS NOT OLD.project_id OR
+				 NEW.next_task_id IS NOT OLD.next_task_id) AND NOT EXISTS (
+				SELECT 1 FROM project_tasks
+				WHERE id = NEW.next_task_id AND project_id = NEW.project_id
+			) THEN RAISE(ABORT, 'next task must belong to review project') END;
 		END;
 	`},
 }

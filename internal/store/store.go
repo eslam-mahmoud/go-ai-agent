@@ -297,6 +297,144 @@ var migrations = []struct {
 			SELECT RAISE(ABORT, 'selected current task cannot move projects');
 		END;
 	`},
+	// v6: persist immutable artifact metadata and sequential mode executions.
+	// Nullable links break the execution/output-artifact creation cycle safely.
+	{6, `
+		CREATE TABLE artifacts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			task_id INTEGER REFERENCES project_tasks(id) ON DELETE SET NULL,
+			execution_id INTEGER REFERENCES executions(id) ON DELETE SET NULL,
+			kind TEXT NOT NULL CHECK (length(trim(kind)) > 0),
+			name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+			path TEXT NOT NULL CHECK (length(trim(path)) > 0),
+			media_type TEXT NOT NULL CHECK (length(trim(media_type)) > 0),
+			sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+			size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+			created_at DATETIME NOT NULL,
+			UNIQUE(project_id, path)
+		);
+
+		CREATE TABLE executions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			task_id INTEGER NOT NULL REFERENCES project_tasks(id) ON DELETE CASCADE,
+			mode TEXT NOT NULL CHECK (length(trim(mode)) > 0),
+			engine TEXT NOT NULL CHECK (length(trim(engine)) > 0),
+			model TEXT NOT NULL DEFAULT '',
+			provider_session_id TEXT NOT NULL DEFAULT '',
+			attempt INTEGER NOT NULL CHECK (attempt > 0),
+			status TEXT NOT NULL CHECK (
+				status IN ('pending', 'running', 'completed', 'failed', 'cancelled', 'interrupted')
+			),
+			input_artifact_id INTEGER REFERENCES artifacts(id) ON DELETE SET NULL,
+			output_artifact_id INTEGER REFERENCES artifacts(id) ON DELETE SET NULL,
+			started_at DATETIME,
+			completed_at DATETIME,
+			error_class TEXT NOT NULL DEFAULT '',
+			error_message TEXT NOT NULL DEFAULT '',
+			input_tokens INTEGER NOT NULL DEFAULT 0 CHECK (input_tokens >= 0),
+			output_tokens INTEGER NOT NULL DEFAULT 0 CHECK (output_tokens >= 0),
+			estimated_cost REAL NOT NULL DEFAULT 0 CHECK (estimated_cost >= 0),
+			CHECK (completed_at IS NULL OR started_at IS NOT NULL),
+			CHECK (
+				completed_at IS NULL OR
+				julianday(completed_at) >= julianday(started_at)
+			),
+			UNIQUE(task_id, mode, attempt)
+		);
+
+		CREATE INDEX idx_executions_project_task
+			ON executions(project_id, task_id, id);
+		CREATE INDEX idx_executions_status
+			ON executions(project_id, status);
+		CREATE INDEX idx_artifacts_task
+			ON artifacts(project_id, task_id, id);
+		CREATE INDEX idx_artifacts_execution
+			ON artifacts(execution_id, id);
+
+		CREATE TRIGGER executions_owner_insert
+		BEFORE INSERT ON executions
+		BEGIN
+			SELECT CASE WHEN NOT EXISTS (
+				SELECT 1 FROM project_tasks
+				WHERE id = NEW.task_id AND project_id = NEW.project_id
+			) THEN RAISE(ABORT, 'execution task must belong to project') END;
+		END;
+
+		CREATE TRIGGER executions_owner_update
+		BEFORE UPDATE OF project_id, task_id ON executions
+		BEGIN
+			SELECT CASE WHEN NOT EXISTS (
+				SELECT 1 FROM project_tasks
+				WHERE id = NEW.task_id AND project_id = NEW.project_id
+			) THEN RAISE(ABORT, 'execution task must belong to project') END;
+		END;
+
+		CREATE TRIGGER artifacts_owner_insert
+		BEFORE INSERT ON artifacts
+		BEGIN
+			SELECT CASE WHEN NEW.task_id IS NOT NULL AND NOT EXISTS (
+				SELECT 1 FROM project_tasks
+				WHERE id = NEW.task_id AND project_id = NEW.project_id
+			) THEN RAISE(ABORT, 'artifact task must belong to project') END;
+			SELECT CASE WHEN NEW.execution_id IS NOT NULL AND NOT EXISTS (
+				SELECT 1 FROM executions
+				WHERE id = NEW.execution_id
+				  AND project_id = NEW.project_id
+				  AND (NEW.task_id IS NULL OR task_id = NEW.task_id)
+			) THEN RAISE(ABORT, 'artifact execution must match project and task') END;
+		END;
+
+		CREATE TRIGGER artifacts_owner_update
+		BEFORE UPDATE OF project_id, task_id, execution_id ON artifacts
+		BEGIN
+			SELECT CASE WHEN NEW.task_id IS NOT NULL AND NOT EXISTS (
+				SELECT 1 FROM project_tasks
+				WHERE id = NEW.task_id AND project_id = NEW.project_id
+			) THEN RAISE(ABORT, 'artifact task must belong to project') END;
+			SELECT CASE WHEN NEW.execution_id IS NOT NULL AND NOT EXISTS (
+				SELECT 1 FROM executions
+				WHERE id = NEW.execution_id
+				  AND project_id = NEW.project_id
+				  AND (NEW.task_id IS NULL OR task_id = NEW.task_id)
+			) THEN RAISE(ABORT, 'artifact execution must match project and task') END;
+		END;
+
+		CREATE TRIGGER executions_artifacts_insert
+		BEFORE INSERT ON executions
+		BEGIN
+			SELECT CASE WHEN NEW.input_artifact_id IS NOT NULL AND NOT EXISTS (
+				SELECT 1 FROM artifacts
+				WHERE id = NEW.input_artifact_id
+				  AND project_id = NEW.project_id
+				  AND (task_id IS NULL OR task_id = NEW.task_id)
+			) THEN RAISE(ABORT, 'input artifact must match execution project and task') END;
+			SELECT CASE WHEN NEW.output_artifact_id IS NOT NULL AND NOT EXISTS (
+				SELECT 1 FROM artifacts
+				WHERE id = NEW.output_artifact_id
+				  AND project_id = NEW.project_id
+				  AND (task_id IS NULL OR task_id = NEW.task_id)
+			) THEN RAISE(ABORT, 'output artifact must match execution project and task') END;
+		END;
+
+		CREATE TRIGGER executions_artifacts_update
+		BEFORE UPDATE OF project_id, task_id, input_artifact_id, output_artifact_id ON executions
+		BEGIN
+			SELECT CASE WHEN NEW.input_artifact_id IS NOT NULL AND NOT EXISTS (
+				SELECT 1 FROM artifacts
+				WHERE id = NEW.input_artifact_id
+				  AND project_id = NEW.project_id
+				  AND (task_id IS NULL OR task_id = NEW.task_id)
+			) THEN RAISE(ABORT, 'input artifact must match execution project and task') END;
+			SELECT CASE WHEN NEW.output_artifact_id IS NOT NULL AND NOT EXISTS (
+				SELECT 1 FROM artifacts
+				WHERE id = NEW.output_artifact_id
+				  AND project_id = NEW.project_id
+				  AND (task_id IS NULL OR task_id = NEW.task_id)
+			) THEN RAISE(ABORT, 'output artifact must match execution project and task') END;
+		END;
+	`},
 }
 
 func (s *Store) migrate() error {

@@ -228,9 +228,14 @@ func TestSyncCreatesOrUpdatesParentIssue(t *testing.T) {
 	}
 
 	project.ParentIssueNumber = 91
+	// A stale managed section so the merge is a real change.
+	stale := strings.Replace(client.createBody, "**Health:** on-track", "**Health:** at-risk", 1)
+	if stale == client.createBody {
+		t.Fatal("fixture did not produce a stale section")
+	}
 	client.existingIssue = &githubclient.Issue{
 		Number: 91,
-		Body:   "Human notes\n\n" + client.createBody + "\n\nHuman footer",
+		Body:   "Human notes\n\n" + stale + "\n\nHuman footer",
 	}
 	updated, err := Sync(context.Background(), client, "owner", "repo", project, nil, nil)
 	if err != nil {
@@ -243,6 +248,31 @@ func TestSyncCreatesOrUpdatesParentIssue(t *testing.T) {
 		!strings.HasSuffix(client.updatedBody, "\n\nHuman footer") ||
 		strings.Count(client.updatedBody, StartMarker) != 1 {
 		t.Errorf("updated body did not preserve human content:\n%s", client.updatedBody)
+	}
+}
+
+func TestSyncSkipsUnchangedManagedSection(t *testing.T) {
+	project := dashboardProject()
+	project.ParentIssueNumber = 91
+	section, err := Render(project, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeIssueClient{
+		existingIssue: &githubclient.Issue{
+			Number: 91,
+			Body:   "Human notes\n\n" + section + "\n\nHuman footer",
+		},
+	}
+	result, err := Sync(context.Background(), client, "owner", "repo", project, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Unchanged || result.Created || result.Issue.Number != 91 {
+		t.Fatalf("result = %#v", result)
+	}
+	if client.updateCalls != 0 {
+		t.Fatalf("unchanged section issued %d updates", client.updateCalls)
 	}
 }
 

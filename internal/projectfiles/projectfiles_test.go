@@ -309,3 +309,70 @@ func assertFile(t *testing.T, path string, want []byte) {
 		t.Errorf("%s = %q, want %q", path, got, want)
 	}
 }
+
+func TestWriteChangedSkipsIdenticalSnapshots(t *testing.T) {
+	workspace := t.TempDir()
+	project := fixtureProject()
+	files, err := Render(project, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := WriteChanged(workspace, files)
+	if err != nil || !changed {
+		t.Fatalf("first WriteChanged = %v, %v", changed, err)
+	}
+	planPath := filepath.Join(workspace, DirectoryName, PlanFileName)
+	before, err := os.Stat(planPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err = WriteChanged(workspace, files)
+	if err != nil || changed {
+		t.Fatalf("second WriteChanged = %v, %v", changed, err)
+	}
+	after, err := os.Stat(planPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Fatal("identical snapshot rewrote the file")
+	}
+
+	project.Health = domain.HealthAtRisk
+	updated, err := Render(project, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := WriteChanged(workspace, updated); err != nil || !changed {
+		t.Fatalf("changed WriteChanged = %v, %v", changed, err)
+	}
+	stored, err := os.ReadFile(filepath.Join(workspace, DirectoryName, ProjectFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(stored, updated.ProjectYAML) {
+		t.Fatal("changed snapshot was not persisted")
+	}
+}
+
+func TestWriteChangedRejectsEmptyAndUnsafeTargets(t *testing.T) {
+	workspace := t.TempDir()
+	if _, err := WriteChanged(workspace, Files{}); !errors.Is(err, ErrInvalidSnapshot) {
+		t.Fatalf("empty WriteChanged error = %v", err)
+	}
+	files, err := Render(fixtureProject(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputDir := filepath.Join(workspace, DirectoryName)
+	if err := os.Mkdir(outputDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(workspace, "elsewhere"), filepath.Join(outputDir, PlanFileName)); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := WriteChanged(workspace, files); !errors.Is(err, ErrUnsafeDirectory) {
+		t.Fatalf("symlinked target error = %v", err)
+	}
+}

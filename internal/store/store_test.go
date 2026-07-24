@@ -1,6 +1,8 @@
 package store
 
 import (
+	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -199,6 +201,102 @@ func TestMigration_idempotent(t *testing.T) {
 	v, _ := s2.SchemaVersion()
 	if v != len(migrations) {
 		t.Errorf("schema version after reopen = %d, want %d", v, len(migrations))
+	}
+}
+
+func TestMigrationPreservesLegacyProviderSession(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE schema_migrations (
+			version INTEGER PRIMARY KEY,
+			applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)
+	`); err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range migrations[:2] {
+		if _, err := db.Exec(migration.sql); err != nil {
+			t.Fatalf("apply legacy migration v%d: %v", migration.version, err)
+		}
+		if _, err := db.Exec(`INSERT INTO schema_migrations (version) VALUES (?)`, migration.version); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`
+		INSERT INTO tasks (repo, issue_number, session_id, state)
+		VALUES ('owner/repo', 42, 'legacy-session', 'interrupted')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("migrate legacy database: %v", err)
+	}
+	defer s.Close()
+	task, err := s.GetTask("owner/repo", 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.SessionID != "legacy-session" || task.Engine != "" || task.Model != "" {
+		t.Fatalf("migrated task = %#v", task)
+	}
+	bound, err := s.BindTaskExecution("owner/repo", 42, StateRecovering, ExecutionBinding{
+		Engine:            "claude",
+		Model:             "sonnet",
+		ProviderSessionID: "replacement-must-not-win",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound.SessionID != "legacy-session" || bound.Engine != "claude" || bound.Model != "sonnet" {
+		t.Errorf("bound legacy task = %#v", bound)
+	}
+}
+
+func TestBindTaskExecutionPinsIdentity(t *testing.T) {
+	s := openTestStore(t)
+	task, err := s.BindTaskExecution("owner/repo", 7, StateInProgress, ExecutionBinding{
+		Engine:            "codex",
+		Model:             "gpt-test",
+		ProviderSessionID: "provisional",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Engine != "codex" || task.Model != "gpt-test" || task.SessionID != "provisional" {
+		t.Fatalf("initial binding = %#v", task)
+	}
+
+	if _, err := s.UpsertTask("owner/repo", 7, StateAwaitingFeedback, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSessionID("owner/repo", 7, "provider-session"); err != nil {
+		t.Fatal(err)
+	}
+	task, _ = s.GetTask("owner/repo", 7)
+	if task.Engine != "codex" || task.Model != "gpt-test" || task.SessionID != "provider-session" {
+		t.Errorf("binding after transition/session update = %#v", task)
+	}
+
+	_, err = s.BindTaskExecution("owner/repo", 7, StateInProgress, ExecutionBinding{
+		Engine:            "codex",
+		Model:             "different-model",
+		ProviderSessionID: "different-session",
+	})
+	if !errors.Is(err, ErrExecutionBindingConflict) {
+		t.Errorf("conflicting binding error = %v", err)
+	}
+	task, _ = s.GetTask("owner/repo", 7)
+	if task.Engine != "codex" || task.Model != "gpt-test" || task.SessionID != "provider-session" {
+		t.Errorf("conflict changed binding = %#v", task)
 	}
 }
 

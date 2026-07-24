@@ -37,6 +37,9 @@ func TestLoad_defaults(t *testing.T) {
 	if cfg.Claude.MaxTurns != 40 {
 		t.Errorf("Claude.MaxTurns = %d, want 40", cfg.Claude.MaxTurns)
 	}
+	if cfg.Claude.Model != "" {
+		t.Errorf("Claude.Model = %q, want provider default", cfg.Claude.Model)
+	}
 	if cfg.Claude.RunTimeout != 30*time.Minute {
 		t.Errorf("Claude.RunTimeout = %v, want 30m", cfg.Claude.RunTimeout)
 	}
@@ -65,6 +68,7 @@ repos:
   - acme/alpha
   - acme/beta
 claude:
+  model: sonnet
   max_turns: 20
   run_timeout: 10m
   context_reset_threshold: 0.8
@@ -92,6 +96,9 @@ claude:
 	}
 	if cfg.Claude.MaxTurns != 20 {
 		t.Errorf("Claude.MaxTurns = %d, want 20", cfg.Claude.MaxTurns)
+	}
+	if cfg.Claude.Model != "sonnet" {
+		t.Errorf("Claude.Model = %q, want sonnet", cfg.Claude.Model)
 	}
 	if cfg.Claude.RunTimeout != 10*time.Minute {
 		t.Errorf("RunTimeout = %v, want 10m", cfg.Claude.RunTimeout)

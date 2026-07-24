@@ -363,6 +363,7 @@ context_dir: .claude-context
 
 claude:
   bin: ""                      # path to claude CLI; empty = find "claude" on PATH
+  model: ""                    # optional model pinned when an execution starts
   output_format: stream-json   # always stream-json (required for session IDs)
   max_turns: 40                # cap agentic turns per invocation; overflow = error
   run_timeout: 30m             # kill the claude process after this wall time

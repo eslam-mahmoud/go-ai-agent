@@ -23,7 +23,9 @@ import (
 type Loop struct {
 	cfg                 *config.Config
 	gh                  githubclient.Client
-	engine              engine.Engine
+	engines             *engine.Registry
+	defaultEngine       string
+	defaultModel        string
 	telegram            telegram.Gateway
 	store               *store.Store
 	log                 *slog.Logger
@@ -42,19 +44,65 @@ func (l *Loop) SetCurrentVersion(v string) { l.currentVersion = v }
 func New(
 	cfg *config.Config,
 	gh githubclient.Client,
-	provider engine.Engine,
+	engines *engine.Registry,
+	defaultEngine string,
+	defaultModel string,
 	tg telegram.Gateway,
 	s *store.Store,
 	log *slog.Logger,
-) *Loop {
-	return &Loop{
-		cfg:      cfg,
-		gh:       gh,
-		engine:   provider,
-		telegram: tg,
-		store:    s,
-		log:      log,
+) (*Loop, error) {
+	if engines == nil {
+		return nil, errors.New("engine registry is required")
 	}
+	if defaultEngine == "" {
+		return nil, errors.New("default engine is required")
+	}
+	if _, err := engines.Resolve(defaultEngine); err != nil {
+		return nil, fmt.Errorf("resolve default engine: %w", err)
+	}
+	return &Loop{
+		cfg:           cfg,
+		gh:            gh,
+		engines:       engines,
+		defaultEngine: defaultEngine,
+		defaultModel:  defaultModel,
+		telegram:      tg,
+		store:         s,
+		log:           log,
+	}, nil
+}
+
+func (l *Loop) resolveTaskEngine(task *store.Task) (*store.Task, engine.Engine, error) {
+	if task == nil {
+		return nil, nil, errors.New("task execution binding is missing")
+	}
+	if task.Engine == "" {
+		bound, err := l.store.BindTaskExecution(
+			task.Repo,
+			task.IssueNumber,
+			task.State,
+			store.ExecutionBinding{
+				Engine:            l.defaultEngine,
+				Model:             l.defaultModel,
+				ProviderSessionID: task.SessionID,
+			},
+		)
+		if err != nil {
+			return nil, nil, fmt.Errorf("bind legacy task execution: %w", err)
+		}
+		task = bound
+	}
+	provider, err := l.engines.Resolve(task.Engine)
+	if err != nil {
+		return task, nil, fmt.Errorf(
+			"resolve stored engine %q for %s#%d: %w",
+			task.Engine,
+			task.Repo,
+			task.IssueNumber,
+			err,
+		)
+	}
+	return task, provider, nil
 }
 
 // Run starts the poll loop and blocks until ctx is cancelled.
@@ -186,21 +234,6 @@ func (l *Loop) recoverInterrupted(ctx context.Context) error {
 			return fmt.Errorf("recover task %s#%d: %w", task.Repo, task.IssueNumber, err)
 		}
 
-		if _, err := l.store.UpsertTask(
-			task.Repo,
-			task.IssueNumber,
-			store.StateRecovering,
-			"",
-		); err != nil {
-			return fmt.Errorf("mark task recovering: %w", err)
-		}
-		_ = l.store.Log(
-			task.Repo,
-			task.IssueNumber,
-			"recovering",
-			fmt.Sprintf("session=%s", task.SessionID),
-		)
-
 		issue, err := l.gh.GetIssue(ctx, owner, repo, task.IssueNumber)
 		if err != nil {
 			return fmt.Errorf("load issue for recovery: %w", err)
@@ -222,12 +255,46 @@ func (l *Loop) recoverInterrupted(ctx context.Context) error {
 				"Madar found an interrupted task without a provider session ID, so it cannot resume safely. Please advise whether to restart the task.",
 			)
 		}
+		boundTask, _, err := l.resolveTaskEngine(task)
+		if err != nil {
+			_ = l.store.Log(task.Repo, task.IssueNumber, "recovery_blocked", err.Error())
+			return l.handleClarification(
+				ctx,
+				owner,
+				repo,
+				task.Repo,
+				task.IssueNumber,
+				issue,
+				fmt.Sprintf(
+					"Madar cannot resume the interrupted provider session because its stored engine is unavailable: %v",
+					err,
+				),
+			)
+		}
+		task = boundTask
+
+		if _, err := l.store.UpsertTask(
+			task.Repo,
+			task.IssueNumber,
+			store.StateRecovering,
+			"",
+		); err != nil {
+			return fmt.Errorf("mark task recovering: %w", err)
+		}
+		_ = l.store.Log(
+			task.Repo,
+			task.IssueNumber,
+			"recovering",
+			fmt.Sprintf("engine=%s model=%s session=%s", task.Engine, task.Model, task.SessionID),
+		)
 
 		prompt := "Madar restarted after this execution was interrupted. Resume the existing session, inspect the current workspace state, and continue the same task without starting over."
 		l.log.Info(
 			"recovering interrupted task",
 			"repo", task.Repo,
 			"issue", task.IssueNumber,
+			"engine", task.Engine,
+			"model", task.Model,
 			"session", task.SessionID,
 		)
 		if err := l.runEngine(
@@ -236,7 +303,6 @@ func (l *Loop) recoverInterrupted(ctx context.Context) error {
 			repo,
 			task.IssueNumber,
 			issue,
-			task.SessionID,
 			prompt,
 			true,
 		); err != nil {
@@ -302,7 +368,7 @@ func (l *Loop) resumeIfReplied(ctx context.Context, owner, repo string, task *st
 
 	// Resume the provider session with all human replies, tagged with author and timestamp.
 	prompt := BuildResumePrompt(replies)
-	return l.runEngine(ctx, owner, repo, task.IssueNumber, issue, task.SessionID, prompt, true)
+	return l.runEngine(ctx, owner, repo, task.IssueNumber, issue, prompt, true)
 }
 
 func (l *Loop) pickAndRun(ctx context.Context) error {
@@ -337,10 +403,25 @@ func (l *Loop) pickAndRun(ctx context.Context) error {
 		l.log.Info("claiming issue", "repo", fullRepo, "issue", issue.Number, "title", issue.Title)
 
 		sessionID := uuid.New().String()
-		if _, err := l.store.UpsertTask(fullRepo, issue.Number, store.StateInProgress, sessionID); err != nil {
+		task, err := l.store.BindTaskExecution(
+			fullRepo,
+			issue.Number,
+			store.StateInProgress,
+			store.ExecutionBinding{
+				Engine:            l.defaultEngine,
+				Model:             l.defaultModel,
+				ProviderSessionID: sessionID,
+			},
+		)
+		if err != nil {
 			return fmt.Errorf("claim task in store: %w", err)
 		}
-		_ = l.store.Log(fullRepo, issue.Number, "claimed", fmt.Sprintf("session=%s", sessionID))
+		_ = l.store.Log(
+			fullRepo,
+			issue.Number,
+			"claimed",
+			fmt.Sprintf("engine=%s model=%s session=%s", task.Engine, task.Model, task.SessionID),
+		)
 
 		if err := l.transitionLabels(ctx, owner, repo, issue.Number, issue.Labels,
 			l.cfg.Labels.Ready, l.cfg.Labels.InProgress); err != nil {
@@ -355,12 +436,12 @@ func (l *Loop) pickAndRun(ctx context.Context) error {
 		threadStr := l.formatHumanThread(comments)
 		prompt := BuildFirstRunPrompt(issue.Title, issue.Body, threadStr, issue.Number, l.cfg.Claude.MaxIssueBodyChars)
 
-		return l.runEngine(ctx, owner, repo, issue.Number, issue, sessionID, prompt, false)
+		return l.runEngine(ctx, owner, repo, issue.Number, issue, prompt, false)
 	}
 	return nil
 }
 
-func (l *Loop) runEngine(ctx context.Context, owner, repo string, issueNumber int, issue *githubclient.Issue, sessionID, prompt string, isResume bool) error {
+func (l *Loop) runEngine(ctx context.Context, owner, repo string, issueNumber int, issue *githubclient.Issue, prompt string, isResume bool) error {
 	workDir := filepath.Join(l.cfg.WorkspaceDir, owner, repo)
 
 	if _, err := os.Stat(workDir); err != nil {
@@ -371,33 +452,52 @@ func (l *Loop) runEngine(ctx context.Context, owner, repo string, issueNumber in
 			fmt.Sprintf("Workspace directory is missing: `%s`\n\nPlease ensure the repo is cloned under `workspace_dir` and retry.", workDir))
 	}
 
+	fullRepo := owner + "/" + repo
+	task, err := l.store.GetTask(fullRepo, issueNumber)
+	if err != nil {
+		return fmt.Errorf("load task execution binding: %w", err)
+	}
+	task, provider, err := l.resolveTaskEngine(task)
+	if err != nil {
+		_ = l.store.Log(fullRepo, issueNumber, "engine_unavailable", err.Error())
+		return err
+	}
+
 	request := engine.RunRequest{
-		WorkDir:  workDir,
-		Prompt:   prompt,
-		MaxTurns: l.cfg.Claude.MaxTurns,
-		Timeout:  l.cfg.Claude.RunTimeout,
+		ExecutionID: task.ID,
+		WorkDir:     workDir,
+		Prompt:      prompt,
+		Model:       task.Model,
+		MaxTurns:    l.cfg.Claude.MaxTurns,
+		Timeout:     l.cfg.Claude.RunTimeout,
 		Policy: engine.Policy{
 			SkipPermissions: l.cfg.Claude.SkipPermissions,
 		},
 	}
 	if isResume {
-		request.ResumeSessionID = sessionID
+		request.ResumeSessionID = task.SessionID
 	} else {
-		request.SessionID = sessionID
+		request.SessionID = task.SessionID
 	}
 
-	fullRepo := owner + "/" + repo
-	l.log.Info("running engine", "engine", l.engine.Name(), "repo", fullRepo, "issue", issueNumber, "session", sessionID, "resume", isResume)
+	l.log.Info(
+		"running engine",
+		"engine", provider.Name(),
+		"model", task.Model,
+		"repo", fullRepo,
+		"issue", issueNumber,
+		"session", task.SessionID,
+		"resume", isResume,
+	)
 
 	var result *engine.Result
-	var err error
 	if isResume {
-		result, err = l.engine.Resume(ctx, request, nil)
+		result, err = provider.Resume(ctx, request, nil)
 	} else {
-		result, err = l.engine.Run(ctx, request, nil)
+		result, err = provider.Run(ctx, request, nil)
 	}
 	if err != nil {
-		l.log.Error("engine run failed", "engine", l.engine.Name(), "err", err)
+		l.log.Error("engine run failed", "engine", provider.Name(), "err", err)
 
 		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 			if _, stateErr := l.store.UpsertTask(
@@ -436,10 +536,13 @@ func (l *Loop) runEngine(ctx context.Context, owner, repo string, issueNumber in
 			"Provider returned no result. Please advise how to proceed.")
 	}
 
-	// Capture session ID from stream if available (first run).
-	if result.SessionID != "" && !isResume {
-		_ = l.store.SetSessionID(fullRepo, issueNumber, result.SessionID)
-		sessionID = result.SessionID
+	// Replace only the provider session when the adapter supplies its canonical
+	// identity. The pinned engine and model remain unchanged.
+	if result.SessionID != "" && result.SessionID != task.SessionID {
+		if err := l.store.SetSessionID(fullRepo, issueNumber, result.SessionID); err != nil {
+			return fmt.Errorf("persist provider session ID: %w", err)
+		}
+		task.SessionID = result.SessionID
 	}
 
 	if result.Status == engine.ResultCancelled {

@@ -84,7 +84,7 @@ type CleanupConfig struct {
 }
 
 type ConcurrencyConfig struct {
-	Enabled    bool
+	Enabled     bool
 	MaxParallel int
 }
 
@@ -97,6 +97,7 @@ type LabelsConfig struct {
 
 type ClaudeConfig struct {
 	Bin                   string // path to the claude CLI binary
+	Model                 string // optional model pinned to each new legacy execution
 	OutputFormat          string
 	MaxTurns              int
 	RunTimeout            time.Duration
@@ -159,6 +160,7 @@ type rawConfig struct {
 	ContextDir string          `yaml:"context_dir"`
 	Claude     struct {
 		Bin                   string  `yaml:"bin"`
+		Model                 string  `yaml:"model"`
 		OutputFormat          string  `yaml:"output_format"`
 		MaxTurns              int     `yaml:"max_turns"`
 		RunTimeoutStr         string  `yaml:"run_timeout"`
@@ -236,7 +238,7 @@ func Load(configPath, envPath string) (*Config, error) {
 	cfg := &Config{
 		PollInterval: time.Duration(raw.PollIntervalSeconds) * time.Second,
 		Concurrency: ConcurrencyConfig{
-			Enabled:    raw.Concurrency.Enabled,
+			Enabled:     raw.Concurrency.Enabled,
 			MaxParallel: raw.Concurrency.MaxParallel,
 		},
 		Labels: LabelsConfig{
@@ -249,6 +251,7 @@ func Load(configPath, envPath string) (*Config, error) {
 		ContextDir: raw.ContextDir,
 		Claude: ClaudeConfig{
 			Bin:                   raw.Claude.Bin,
+			Model:                 raw.Claude.Model,
 			OutputFormat:          raw.Claude.OutputFormat,
 			MaxTurns:              raw.Claude.MaxTurns,
 			RunTimeout:            runTimeout,

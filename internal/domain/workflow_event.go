@@ -34,6 +34,7 @@ const (
 	WorkflowDiscoveriesRecorded  WorkflowEventType = "discoveries.recorded"
 	WorkflowDiscoveriesDecided   WorkflowEventType = "discoveries.decided"
 	WorkflowDiscoveryPublished   WorkflowEventType = "discovery.published"
+	WorkflowDiscoveryQueued      WorkflowEventType = "discovery.queued"
 )
 
 var ErrInvalidWorkflowEvent = errors.New("invalid workflow event")

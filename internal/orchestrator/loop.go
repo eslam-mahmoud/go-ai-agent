@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -65,6 +66,10 @@ func (l *Loop) Run(ctx context.Context) error {
 	} else {
 		l.botUsername = username
 		l.log.Info("bot username resolved", "username", username)
+	}
+
+	if err := l.recoverInterrupted(ctx); err != nil {
+		return fmt.Errorf("startup recovery: %w", err)
 	}
 
 	l.log.Info("madar starting", "poll_interval", l.cfg.PollInterval)
@@ -157,6 +162,85 @@ func (l *Loop) checkAwaitingFeedback(ctx context.Context) error {
 		}
 		if err := l.resumeIfReplied(ctx, owner, repo, task); err != nil {
 			l.log.Error("resume check failed", "repo", task.Repo, "issue", task.IssueNumber, "err", err)
+		}
+	}
+	return nil
+}
+
+func (l *Loop) recoverInterrupted(ctx context.Context) error {
+	interruptedCount, err := l.store.MarkActiveTasksInterrupted()
+	if err != nil {
+		return err
+	}
+	if interruptedCount > 0 {
+		l.log.Info("found unfinished provider executions", "count", interruptedCount)
+	}
+
+	tasks, err := l.store.ListByState(store.StateInterrupted)
+	if err != nil {
+		return fmt.Errorf("list interrupted tasks: %w", err)
+	}
+	for _, task := range tasks {
+		owner, repo, err := githubclient.SplitRepo(task.Repo)
+		if err != nil {
+			return fmt.Errorf("recover task %s#%d: %w", task.Repo, task.IssueNumber, err)
+		}
+
+		if _, err := l.store.UpsertTask(
+			task.Repo,
+			task.IssueNumber,
+			store.StateRecovering,
+			"",
+		); err != nil {
+			return fmt.Errorf("mark task recovering: %w", err)
+		}
+		_ = l.store.Log(
+			task.Repo,
+			task.IssueNumber,
+			"recovering",
+			fmt.Sprintf("session=%s", task.SessionID),
+		)
+
+		issue, err := l.gh.GetIssue(ctx, owner, repo, task.IssueNumber)
+		if err != nil {
+			return fmt.Errorf("load issue for recovery: %w", err)
+		}
+		if task.SessionID == "" {
+			_ = l.store.Log(
+				task.Repo,
+				task.IssueNumber,
+				"recovery_blocked",
+				"provider session ID is missing",
+			)
+			return l.handleClarification(
+				ctx,
+				owner,
+				repo,
+				task.Repo,
+				task.IssueNumber,
+				issue,
+				"Madar found an interrupted task without a provider session ID, so it cannot resume safely. Please advise whether to restart the task.",
+			)
+		}
+
+		prompt := "Madar restarted after this execution was interrupted. Resume the existing session, inspect the current workspace state, and continue the same task without starting over."
+		l.log.Info(
+			"recovering interrupted task",
+			"repo", task.Repo,
+			"issue", task.IssueNumber,
+			"session", task.SessionID,
+		)
+		if err := l.runClaude(
+			ctx,
+			owner,
+			repo,
+			task.IssueNumber,
+			issue,
+			task.SessionID,
+			prompt,
+			true,
+		); err != nil {
+			return fmt.Errorf("resume interrupted task: %w", err)
 		}
 	}
 	return nil
@@ -307,25 +391,34 @@ func (l *Loop) runClaude(ctx context.Context, owner, repo string, issueNumber in
 	if err != nil {
 		l.log.Error("claude run failed", "err", err)
 
-		// If the main context was cancelled (SIGTERM/shutdown), use a fresh
-		// context for cleanup so GitHub API calls and store updates succeed.
-		cleanupCtx := ctx
-		if ctx.Err() != nil {
-			var cancel context.CancelFunc
-			cleanupCtx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			l.log.Info("agent shutting down, transitioning task to awaiting-feedback",
-				"repo", fullRepo, "issue", issueNumber)
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+			if _, stateErr := l.store.UpsertTask(
+				fullRepo,
+				issueNumber,
+				store.StateInterrupted,
+				"",
+			); stateErr != nil {
+				return fmt.Errorf("mark task interrupted during shutdown: %w", stateErr)
+			}
+			_ = l.store.Log(
+				fullRepo,
+				issueNumber,
+				"interrupted",
+				"provider execution cancelled during daemon shutdown",
+			)
+			l.log.Info(
+				"agent shutdown interrupted active task",
+				"repo", fullRepo,
+				"issue", issueNumber,
+			)
+			return nil
 		}
 
 		_ = l.store.Log(fullRepo, issueNumber, "error", err.Error())
-		_ = l.telegram.NotifyError(cleanupCtx, issue.HTMLURL, err)
+		_ = l.telegram.NotifyError(ctx, issue.HTMLURL, err)
 		// Transition to awaiting-feedback so the task doesn't stay in-progress.
 		question := fmt.Sprintf("Claude process failed: %v\n\nPlease advise how to proceed.", err)
-		if ctx.Err() != nil {
-			question = "Madar shut down while working on this task. It will resume on the next start, or you can reply here to guide it."
-		}
-		return l.handleClarification(cleanupCtx, owner, repo, fullRepo, issueNumber, issue, question)
+		return l.handleClarification(ctx, owner, repo, fullRepo, issueNumber, issue, question)
 	}
 
 	// Capture session ID from stream if available (first run).

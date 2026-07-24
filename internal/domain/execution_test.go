@@ -32,6 +32,25 @@ func TestNewExecutionDefaultsAndStatuses(t *testing.T) {
 	}
 }
 
+func TestExecutionStatusOccupiesProviderLane(t *testing.T) {
+	for _, test := range []struct {
+		status ExecutionStatus
+		want   bool
+	}{
+		{ExecutionPending, false},
+		{ExecutionRunning, true},
+		{ExecutionCompleted, false},
+		{ExecutionFailed, false},
+		{ExecutionCancelled, false},
+		{ExecutionInterrupted, false},
+		{ExecutionStatus("unknown"), false},
+	} {
+		if got := test.status.OccupiesProviderLane(); got != test.want {
+			t.Errorf("%q.OccupiesProviderLane() = %t, want %t", test.status, got, test.want)
+		}
+	}
+}
+
 func TestExecutionValidation(t *testing.T) {
 	valid := *NewExecution(1, 2, "developer", "codex", "", 1)
 	started := time.Now().UTC()

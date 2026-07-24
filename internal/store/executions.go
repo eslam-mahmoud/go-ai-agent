@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/eslam-mahmoud/go-ai-agent/internal/domain"
@@ -12,6 +13,7 @@ import (
 var (
 	ErrExecutionAlreadyExists = errors.New("execution already exists")
 	ErrExecutionNotFound      = errors.New("execution not found")
+	ErrRunningExecutionExists = errors.New("a running execution already exists")
 )
 
 func (s *Store) CreateExecution(execution *domain.Execution) (*domain.Execution, error) {
@@ -62,7 +64,7 @@ func (s *Store) CreateExecution(execution *domain.Execution) (*domain.Execution,
 		execution.EstimatedCost,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("insert execution: %w", err)
+		return nil, fmt.Errorf("insert execution: %w", classifyRunningExecutionConstraint(err))
 	}
 	id, err := result.LastInsertId()
 	if err != nil {
@@ -133,7 +135,7 @@ func (s *Store) UpdateExecution(execution *domain.Execution) (*domain.Execution,
 		execution.EstimatedCost, execution.ID,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("update execution: %w", err)
+		return nil, fmt.Errorf("update execution: %w", classifyRunningExecutionConstraint(err))
 	}
 	updated, err := result.RowsAffected()
 	if err != nil {
@@ -149,6 +151,16 @@ func (s *Store) UpdateExecution(execution *domain.Execution) (*domain.Execution,
 		return nil, fmt.Errorf("commit update execution: %w", err)
 	}
 	return s.GetExecutionByID(execution.ID)
+}
+
+func classifyRunningExecutionConstraint(err error) error {
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(err.Error(), "idx_executions_single_running") {
+		return fmt.Errorf("%w: %v", ErrRunningExecutionExists, err)
+	}
+	return err
 }
 
 func (s *Store) ListTaskExecutions(taskID int64) ([]*domain.Execution, error) {

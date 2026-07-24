@@ -31,6 +31,16 @@ var (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "migrate-project" {
+		if err := projectcli.RunMigration(os.Args[2:], os.Stdout, os.Stderr); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return
+			}
+			fmt.Fprintf(os.Stderr, "madar migrate-project: %v\n", err)
+			os.Exit(2)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "project" {
 		if err := projectcli.Run(os.Args[2:], os.Stdout, os.Stderr); err != nil {
 			if errors.Is(err, flag.ErrHelp) {

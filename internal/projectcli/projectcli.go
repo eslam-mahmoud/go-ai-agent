@@ -28,6 +28,62 @@ type configFlags struct {
 	envPath    string
 }
 
+// RunMigration executes the top-level legacy compatibility command specified
+// by the v2 migration plan.
+func RunMigration(args []string, stdout, stderr io.Writer) error {
+	fs := newFlagSet("migrate-project", stderr)
+	cfgFlags := addConfigFlags(fs)
+	repoValue := fs.String("repo", "", "legacy repository identity in owner/name form")
+	name := fs.String("name", "", "project display name (defaults to repository name)")
+	goal := fs.String("goal", "", "project goal")
+	scope := fs.String("scope", "Migrated from legacy issue mode.", "project scope")
+	releaseTarget := fs.String("release-target", "", "optional release target")
+	parentIssue := fs.Int("parent-issue", 0, "optional existing parent issue number")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if err := requireValues(requiredValue{"repo", *repoValue}); err != nil {
+		return err
+	}
+	repo, err := normalizeRepo(*repoValue)
+	if err != nil {
+		return err
+	}
+	repoParts := strings.Split(repo, "/")
+	if strings.TrimSpace(*name) == "" {
+		*name = repoParts[1]
+	}
+	if strings.TrimSpace(*goal) == "" {
+		*goal = fmt.Sprintf("Continue %s under Madar v2.", repo)
+	}
+
+	s, err := openStore(cfgFlags)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	report, err := s.MigrateLegacyProject(store.LegacyProjectMigrationOptions{
+		Repo:              repo,
+		Name:              *name,
+		Goal:              *goal,
+		Scope:             *scope,
+		ReleaseTarget:     *releaseTarget,
+		ParentIssueNumber: *parentIssue,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "migrated legacy repository %s to project %d\n", repo, report.Project.ID)
+	fmt.Fprintf(stdout, "  project created      : %t\n", report.ProjectCreated)
+	fmt.Fprintf(stdout, "  legacy tasks         : %d\n", report.LegacyTasks)
+	fmt.Fprintf(stdout, "  newly mapped         : %d\n", report.MigratedTasks)
+	fmt.Fprintf(stdout, "  already mapped       : %d\n", report.AlreadyMigrated)
+	fmt.Fprintf(stdout, "  project tasks created: %d\n", report.ProjectTasksCreated)
+	fmt.Fprintf(stdout, "  executions created   : %d\n", report.ExecutionsCreated)
+	fmt.Fprintln(stdout, "  legacy rows preserved: true")
+	return nil
+}
+
 // Run executes one project subcommand using args without the leading
 // "project" token. Project commands intentionally load only configuration and
 // storage; they do not require GitHub credentials or an installed engine CLI.
@@ -534,6 +590,7 @@ func displayTime(value *time.Time) string {
 
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, `Usage:
+  madar migrate-project --repo owner/name [options]
   madar project create --repo owner/name --name NAME --goal GOAL [options]
   madar project list [options]
   madar project show --repo owner/name [options]

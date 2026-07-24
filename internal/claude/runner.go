@@ -5,12 +5,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/eslam-mahmoud/go-ai-agent/internal/engine"
 )
 
 // Result is the outcome of a claude invocation.
@@ -100,19 +104,49 @@ func (r *cliRunner) Run(ctx context.Context, opts RunOptions) (*Result, error) {
 		defer cancel()
 	}
 
+	if err := validateWorkDir(opts.WorkDir); err != nil {
+		return nil, engine.NewExecutionError(
+			engine.ErrorWorkspaceInvalid,
+			"claude",
+			"validate-workspace",
+			err,
+		)
+	}
+	if err := cmdCtx.Err(); err != nil {
+		return nil, contextExecutionError("start", err, "")
+	}
+
 	cmd := exec.CommandContext(cmdCtx, r.claudeBin, args...)
 	cmd.Dir = opts.WorkDir
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, fmt.Errorf("stdout pipe: %w", err)
+		return nil, engine.NewExecutionError(
+			engine.ErrorUnknown,
+			"claude",
+			"open-stdout",
+			fmt.Errorf("stdout pipe: %w", err),
+		)
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return nil, fmt.Errorf("stderr pipe: %w", err)
+		return nil, engine.NewExecutionError(
+			engine.ErrorUnknown,
+			"claude",
+			"open-stderr",
+			fmt.Errorf("stderr pipe: %w", err),
+		)
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start claude: %w", err)
+		if ctxErr := cmdCtx.Err(); ctxErr != nil {
+			return nil, contextExecutionError("start", ctxErr, "")
+		}
+		return nil, engine.NewExecutionError(
+			engine.ErrorProviderUnavailable,
+			"claude",
+			"start",
+			fmt.Errorf("start claude: %w", err),
+		)
 	}
 
 	stderrCapture := &limitedBuffer{limit: maxStderrBytes}
@@ -127,24 +161,76 @@ func (r *cliRunner) Run(ctx context.Context, opts RunOptions) (*Result, error) {
 	waitErr := cmd.Wait()
 	stderrText := sanitizeStderr(stderrCapture.String(), stderrCapture.truncated)
 
-	if waitErr != nil && cmdCtx.Err() == context.DeadlineExceeded {
-		return nil, withStderr(
-			fmt.Sprintf("claude timed out after %s", opts.Timeout),
-			context.DeadlineExceeded,
-			stderrText,
+	if waitErr != nil && errors.Is(cmdCtx.Err(), context.DeadlineExceeded) {
+		return nil, engine.NewExecutionError(
+			engine.ErrorTimeout,
+			"claude",
+			"run",
+			withStderr(
+				fmt.Sprintf("claude timed out after %s", opts.Timeout),
+				context.DeadlineExceeded,
+				stderrText,
+			),
 		)
 	}
+	if waitErr != nil && errors.Is(cmdCtx.Err(), context.Canceled) {
+		return nil, contextExecutionError("run", context.Canceled, stderrText)
+	}
 	if waitErr != nil {
-		return nil, withStderr("claude process failed", waitErr, stderrText)
+		return nil, engine.NewExecutionError(
+			engine.ErrorProcessExit,
+			"claude",
+			"run",
+			withStderr("claude process failed", waitErr, stderrText),
+		)
 	}
 	if parseErr != nil {
-		return nil, withStderr("parse claude stream", parseErr, stderrText)
+		return nil, engine.NewExecutionError(
+			engine.ErrorInvalidOutput,
+			"claude",
+			"parse-output",
+			withStderr("parse claude stream", parseErr, stderrText),
+		)
 	}
 	if stderrErr != nil {
-		return nil, fmt.Errorf("read claude stderr: %w", stderrErr)
+		return nil, engine.NewExecutionError(
+			engine.ErrorUnknown,
+			"claude",
+			"read-stderr",
+			fmt.Errorf("read claude stderr: %w", stderrErr),
+		)
 	}
 
 	return result, nil
+}
+
+func validateWorkDir(workDir string) error {
+	if workDir == "" {
+		return nil
+	}
+	info, err := os.Stat(workDir)
+	if err != nil {
+		return fmt.Errorf("validate work directory %q: %w", workDir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("validate work directory %q: not a directory", workDir)
+	}
+	return nil
+}
+
+func contextExecutionError(operation string, cause error, stderr string) error {
+	class := engine.ErrorCancelled
+	message := "claude execution cancelled"
+	if errors.Is(cause, context.DeadlineExceeded) {
+		class = engine.ErrorTimeout
+		message = "claude execution timed out"
+	}
+	return engine.NewExecutionError(
+		class,
+		"claude",
+		operation,
+		withStderr(message, cause, stderr),
+	)
 }
 
 type limitedBuffer struct {

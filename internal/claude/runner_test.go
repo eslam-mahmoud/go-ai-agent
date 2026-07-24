@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/eslam-mahmoud/go-ai-agent/internal/engine"
 )
 
 func TestDetectClarification(t *testing.T) {
@@ -266,6 +268,9 @@ func TestCLIRunner_rejectsNonZeroExitAndIncludesStderr(t *testing.T) {
 	if !errors.As(err, &exitErr) {
 		t.Errorf("error %T does not wrap *exec.ExitError", err)
 	}
+	if got := engine.ClassOf(err); got != engine.ErrorProcessExit {
+		t.Errorf("error class = %q, want %q", got, engine.ErrorProcessExit)
+	}
 }
 
 func TestCLIRunner_rejectsNonZeroExitWithoutStderr(t *testing.T) {
@@ -331,6 +336,9 @@ func TestCLIRunner_rejectsZeroExitWithoutTerminalResult(t *testing.T) {
 	if !strings.Contains(err.Error(), "terminal result") {
 		t.Errorf("error %q does not identify missing terminal result", err)
 	}
+	if got := engine.ClassOf(err); got != engine.ErrorInvalidOutput {
+		t.Errorf("error class = %q, want %q", got, engine.ErrorInvalidOutput)
+	}
 }
 
 func TestCLIRunner_rejectsZeroExitWithoutOutput(t *testing.T) {
@@ -368,6 +376,58 @@ func TestCLIRunner_timeoutRemainsDistinguishable(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "timed out") {
 		t.Errorf("error %q does not identify timeout", err)
+	}
+	if got := engine.ClassOf(err); got != engine.ErrorTimeout {
+		t.Errorf("error class = %q, want %q", got, engine.ErrorTimeout)
+	}
+}
+
+func TestCLIRunner_classifiesUnavailableProvider(t *testing.T) {
+	missingBin := filepath.Join(t.TempDir(), "missing-claude")
+
+	result, err := New(missingBin).Run(context.Background(), RunOptions{
+		WorkDir: t.TempDir(),
+		Prompt:  "test",
+		Timeout: 5 * time.Second,
+	})
+	if result != nil {
+		t.Errorf("Run result = %#v, want nil", result)
+	}
+	if got := engine.ClassOf(err); got != engine.ErrorProviderUnavailable {
+		t.Errorf("error class = %q, want %q (error: %v)", got, engine.ErrorProviderUnavailable, err)
+	}
+}
+
+func TestCLIRunner_classifiesInvalidWorkspace(t *testing.T) {
+	result, err := New("/bin/sh").Run(context.Background(), RunOptions{
+		WorkDir: filepath.Join(t.TempDir(), "missing-workspace"),
+		Prompt:  "test",
+		Timeout: 5 * time.Second,
+	})
+	if result != nil {
+		t.Errorf("Run result = %#v, want nil", result)
+	}
+	if got := engine.ClassOf(err); got != engine.ErrorWorkspaceInvalid {
+		t.Errorf("error class = %q, want %q (error: %v)", got, engine.ErrorWorkspaceInvalid, err)
+	}
+}
+
+func TestCLIRunner_classifiesCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := New("/bin/sh").Run(ctx, RunOptions{
+		WorkDir: t.TempDir(),
+		Prompt:  "test",
+	})
+	if result != nil {
+		t.Errorf("Run result = %#v, want nil", result)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Run error = %v, want wrapped context.Canceled", err)
+	}
+	if got := engine.ClassOf(err); got != engine.ErrorCancelled {
+		t.Errorf("error class = %q, want %q", got, engine.ErrorCancelled)
 	}
 }
 

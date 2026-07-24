@@ -19,12 +19,12 @@ func TestLegacyRunnerUsesAdapterAndPreservesResult(t *testing.T) {
 		`{"type":"result","is_error":false,"result":"NEEDS_CLARIFICATION: Which region?","session_id":"session-1","num_turns":4}`,
 	))
 
+	// The timeout is generous on purpose: this asserts argument handling, not
+	// timeout behavior, and a short budget flakes under full-suite load.
 	result, err := New(bin).Run(context.Background(), RunOptions{
 		WorkDir:         t.TempDir(),
 		ResumeID:        "session-1",
 		MaxTurns:        8,
-		// Generous: this asserts argument handling, not timeout behavior, and
-		// a short budget flakes when the whole suite runs in parallel.
 		Timeout:         60 * time.Second,
 		Prompt:          "continue",
 		SkipPermissions: true,

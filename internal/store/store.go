@@ -642,6 +642,58 @@ var migrations = []struct {
 			) THEN RAISE(ABORT, 'workflow event execution must belong to project and task') END;
 		END;
 	`},
+	// v13: work revealed by implementation. Discoveries are persisted before
+	// evaluation so nothing observed is dropped, and the vocabularies are
+	// enforced by the database as well as the domain.
+	{13, `
+		CREATE TABLE discoveries (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			source_task_id INTEGER REFERENCES project_tasks(id) ON DELETE SET NULL,
+			source_execution_id INTEGER REFERENCES executions(id) ON DELETE SET NULL,
+			external_id TEXT NOT NULL DEFAULT '',
+			title TEXT NOT NULL CHECK (length(trim(title)) > 0),
+			description TEXT NOT NULL DEFAULT '',
+			category TEXT NOT NULL CHECK (
+				category IN (
+					'bug', 'missing-requirement', 'technical-debt', 'security',
+					'architecture', 'testing', 'documentation', 'observability',
+					'performance', 'dependency', 'scope-change'
+				)
+			),
+			severity TEXT NOT NULL CHECK (
+				severity IN ('low', 'medium', 'high', 'critical')
+			),
+			blocks_current INTEGER NOT NULL DEFAULT 0,
+			architecture_risk INTEGER NOT NULL DEFAULT 0,
+			suggested_action TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'unevaluated' CHECK (
+				status IN ('unevaluated', 'accepted', 'rejected', 'deferred', 'merged')
+			),
+			decision_reason TEXT NOT NULL DEFAULT '',
+			created_issue_number INTEGER NOT NULL DEFAULT 0,
+			backlog_position INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL
+		);
+		CREATE INDEX idx_discoveries_project_status
+			ON discoveries(project_id, status, id);
+		CREATE INDEX idx_discoveries_source
+			ON discoveries(project_id, source_task_id, source_execution_id);
+
+		CREATE TRIGGER discoveries_owner_insert
+		BEFORE INSERT ON discoveries
+		BEGIN
+			SELECT CASE WHEN NEW.source_task_id IS NOT NULL AND NOT EXISTS (
+				SELECT 1 FROM project_tasks
+				WHERE id = NEW.source_task_id AND project_id = NEW.project_id
+			) THEN RAISE(ABORT, 'discovery task must belong to project') END;
+			SELECT CASE WHEN NEW.source_execution_id IS NOT NULL AND NOT EXISTS (
+				SELECT 1 FROM executions
+				WHERE id = NEW.source_execution_id AND project_id = NEW.project_id
+			) THEN RAISE(ABORT, 'discovery execution must belong to project') END;
+		END;
+	`},
 }
 
 func (s *Store) migrate() error {

@@ -11,15 +11,25 @@ import (
 )
 
 var (
-	ErrTaskNotFound      = errors.New("controller task not found")
-	ErrTaskOwnership     = errors.New("controller task belongs to another project")
-	ErrInconsistentState = errors.New("inconsistent project aggregate")
+	ErrTaskNotFound          = errors.New("controller task not found")
+	ErrTaskOwnership         = errors.New("controller task belongs to another project")
+	ErrInconsistentState     = errors.New("inconsistent project aggregate")
+	ErrInvalidControl        = errors.New("invalid project control action")
+	ErrNoCurrentTask         = errors.New("project has no current task")
+	ErrExecutionNotRetryable = errors.New("latest execution is not retryable")
 )
 
 type Store interface {
 	LoadProjectAggregate(projectID int64) (*store.ProjectAggregate, error)
 	GetProjectTaskByID(id int64) (*domain.Task, error)
 	ApplyProjectTaskTransition(update store.ProjectTaskTransitionUpdate) error
+	PauseProject(projectID int64, expected domain.ProjectState) error
+	ResumeProject(projectID int64, target domain.ProjectState) error
+	CancelProjectTask(update store.ProjectTaskCancellation) error
+	GetLatestTaskExecution(taskID int64) (*domain.Execution, error)
+	RetryProjectTaskExecution(
+		update store.ProjectExecutionRetry,
+	) (*domain.Execution, error)
 }
 
 type Snapshot struct {
@@ -127,6 +137,152 @@ func (controller *Controller) TransitionTask(
 	return controller.Snapshot(projectID)
 }
 
+// Pause durably suspends a non-terminal project and atomically interrupts its
+// running provider execution. The current task phase remains unchanged so a
+// later retry can resume the same unit of work.
+func (controller *Controller) Pause(projectID int64) (*Snapshot, error) {
+	snapshot, err := controller.Snapshot(projectID)
+	if err != nil {
+		return nil, err
+	}
+	switch snapshot.Project.State {
+	case domain.ProjectPaused:
+		return nil, fmt.Errorf("%w: project %d is already paused", ErrInvalidControl, projectID)
+	case domain.ProjectCompleted:
+		return nil, fmt.Errorf("%w: completed project %d cannot be paused", ErrInvalidControl, projectID)
+	}
+	if err := controller.store.PauseProject(projectID, snapshot.Project.State); err != nil {
+		return nil, err
+	}
+	return controller.Snapshot(projectID)
+}
+
+// Resume restores the exact state persisted when Pause succeeded.
+func (controller *Controller) Resume(projectID int64) (*Snapshot, error) {
+	snapshot, err := controller.Snapshot(projectID)
+	if err != nil {
+		return nil, err
+	}
+	if snapshot.Project.State != domain.ProjectPaused ||
+		!snapshot.Project.PausedFromState.Valid() ||
+		snapshot.Project.PausedFromState == domain.ProjectPaused {
+		return nil, fmt.Errorf("%w: project %d is not resumable", ErrInvalidControl, projectID)
+	}
+	if err := controller.store.ResumeProject(
+		projectID,
+		snapshot.Project.PausedFromState,
+	); err != nil {
+		return nil, err
+	}
+	return controller.Snapshot(projectID)
+}
+
+// Cancel cancels the current task through the canonical task transition
+// validator and atomically cancels any pending/running execution.
+func (controller *Controller) Cancel(projectID int64) (*Snapshot, error) {
+	snapshot, err := controller.Snapshot(projectID)
+	if err != nil {
+		return nil, err
+	}
+	if snapshot.CurrentTask == nil {
+		return nil, fmt.Errorf("%w: project %d", ErrNoCurrentTask, projectID)
+	}
+	if err := workflow.ValidateTaskTransition(workflow.TaskTransition{
+		From: snapshot.CurrentTask.Status,
+		To:   domain.TaskCancelled,
+	}); err != nil {
+		return nil, err
+	}
+	if err := controller.store.CancelProjectTask(store.ProjectTaskCancellation{
+		ProjectID:            projectID,
+		TaskID:               snapshot.CurrentTask.ID,
+		ExpectedProjectState: snapshot.Project.State,
+		ExpectedTaskStatus:   snapshot.CurrentTask.Status,
+	}); err != nil {
+		return nil, err
+	}
+	return controller.Snapshot(projectID)
+}
+
+// Retry creates a new pending attempt for the latest failed, cancelled, or
+// interrupted execution. Historical attempts remain immutable.
+func (controller *Controller) Retry(
+	projectID int64,
+) (*Snapshot, *domain.Execution, error) {
+	snapshot, err := controller.Snapshot(projectID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if snapshot.Project.State == domain.ProjectPaused {
+		return nil, nil, fmt.Errorf(
+			"%w: resume project %d before retrying",
+			ErrInvalidControl,
+			projectID,
+		)
+	}
+	if snapshot.CurrentTask == nil {
+		return nil, nil, fmt.Errorf("%w: project %d", ErrNoCurrentTask, projectID)
+	}
+	previous, err := controller.store.GetLatestTaskExecution(snapshot.CurrentTask.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if previous == nil || !retryableExecutionStatus(previous.Status) {
+		return nil, nil, fmt.Errorf(
+			"%w: task %d",
+			ErrExecutionNotRetryable,
+			snapshot.CurrentTask.ID,
+		)
+	}
+	target, ok := retryTaskStatus(previous.Mode)
+	if !ok {
+		return nil, nil, fmt.Errorf(
+			"%w: execution mode %q has no task phase",
+			ErrExecutionNotRetryable,
+			previous.Mode,
+		)
+	}
+	if snapshot.CurrentTask.Status != target {
+		if snapshot.CurrentTask.Status != domain.TaskBlocked {
+			return nil, nil, fmt.Errorf(
+				"%w: task %d is %q, retry requires %q or blocked",
+				ErrExecutionNotRetryable,
+				snapshot.CurrentTask.ID,
+				snapshot.CurrentTask.Status,
+				target,
+			)
+		}
+		if err := workflow.ValidateTaskTransition(workflow.TaskTransition{
+			From: snapshot.CurrentTask.Status,
+			To:   target,
+			Evidence: workflow.TaskTransitionEvidence{
+				BlockerResolved: true,
+				PlanCompleted:   target == domain.TaskDeveloping,
+			},
+		}); err != nil {
+			return nil, nil, err
+		}
+	}
+	retry, err := controller.store.RetryProjectTaskExecution(
+		store.ProjectExecutionRetry{
+			ProjectID:            projectID,
+			TaskID:               snapshot.CurrentTask.ID,
+			ExecutionID:          previous.ID,
+			ExpectedProjectState: snapshot.Project.State,
+			ExpectedTaskStatus:   snapshot.CurrentTask.Status,
+			NewTaskStatus:        target,
+		},
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	updated, err := controller.Snapshot(projectID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return updated, retry, nil
+}
+
 // TaskStatus and ApplyTaskTransition form the narrow provider-neutral boundary
 // consumed by workflow.FeatureWorkflow.
 func (controller *Controller) TaskStatus(projectID, taskID int64) (domain.TaskStatus, error) {
@@ -134,11 +290,42 @@ func (controller *Controller) TaskStatus(projectID, taskID int64) (domain.TaskSt
 	if err != nil {
 		return "", err
 	}
+	if snapshot.Project.State == domain.ProjectPaused {
+		return "", fmt.Errorf("%w: project %d", store.ErrProjectPaused, projectID)
+	}
 	task := findTask(snapshot.Tasks, taskID)
 	if task == nil {
 		return "", fmt.Errorf("%w: task %d in project %d", ErrTaskNotFound, taskID, projectID)
 	}
 	return task.Status, nil
+}
+
+func retryableExecutionStatus(status domain.ExecutionStatus) bool {
+	switch status {
+	case domain.ExecutionFailed,
+		domain.ExecutionCancelled,
+		domain.ExecutionInterrupted:
+		return true
+	default:
+		return false
+	}
+}
+
+func retryTaskStatus(mode string) (domain.TaskStatus, bool) {
+	switch mode {
+	case "planner":
+		return domain.TaskPlanning, true
+	case "developer", "legacy-developer":
+		return domain.TaskDeveloping, true
+	case "reviewer":
+		return domain.TaskReviewing, true
+	case "fixer":
+		return domain.TaskFixing, true
+	case "verifier":
+		return domain.TaskVerifying, true
+	default:
+		return "", false
+	}
 }
 
 func (controller *Controller) ApplyTaskTransition(

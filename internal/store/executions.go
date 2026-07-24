@@ -11,9 +11,10 @@ import (
 )
 
 var (
-	ErrExecutionAlreadyExists = errors.New("execution already exists")
-	ErrExecutionNotFound      = errors.New("execution not found")
-	ErrRunningExecutionExists = errors.New("a running execution already exists")
+	ErrExecutionAlreadyExists  = errors.New("execution already exists")
+	ErrExecutionNotFound       = errors.New("execution not found")
+	ErrExecutionUpdateConflict = errors.New("execution update conflict")
+	ErrRunningExecutionExists  = errors.New("a running execution already exists")
 )
 
 func (s *Store) CreateExecution(execution *domain.Execution) (*domain.Execution, error) {
@@ -96,12 +97,20 @@ func (s *Store) UpdateExecution(execution *domain.Execution) (*domain.Execution,
 	}
 	defer tx.Rollback()
 	var projectID, taskID int64
-	var mode, engineName, model string
+	var mode, engineName, model, storedStatus string
 	var attempt int
 	err = tx.QueryRow(`
-		SELECT project_id, task_id, mode, engine, model, attempt
+		SELECT project_id, task_id, mode, engine, model, attempt, status
 		FROM executions WHERE id = ?
-	`, execution.ID).Scan(&projectID, &taskID, &mode, &engineName, &model, &attempt)
+	`, execution.ID).Scan(
+		&projectID,
+		&taskID,
+		&mode,
+		&engineName,
+		&model,
+		&attempt,
+		&storedStatus,
+	)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("%w: ID %d", ErrExecutionNotFound, execution.ID)
 	}
@@ -114,6 +123,15 @@ func (s *Store) UpdateExecution(execution *domain.Execution) (*domain.Execution,
 		return nil, fmt.Errorf(
 			"%w: project, task, mode, engine, model, and attempt are immutable",
 			domain.ErrInvalidExecution,
+		)
+	}
+	if storedStatus != string(execution.Status) &&
+		executionStatusImmutable(domain.ExecutionStatus(storedStatus)) {
+		return nil, fmt.Errorf(
+			"%w: execution %d is already %q",
+			ErrExecutionUpdateConflict,
+			execution.ID,
+			storedStatus,
 		)
 	}
 	if err := validateExecutionArtifacts(tx, execution); err != nil {
@@ -153,6 +171,18 @@ func (s *Store) UpdateExecution(execution *domain.Execution) (*domain.Execution,
 	return s.GetExecutionByID(execution.ID)
 }
 
+func executionStatusImmutable(status domain.ExecutionStatus) bool {
+	switch status {
+	case domain.ExecutionCompleted,
+		domain.ExecutionFailed,
+		domain.ExecutionCancelled,
+		domain.ExecutionInterrupted:
+		return true
+	default:
+		return false
+	}
+}
+
 func classifyRunningExecutionConstraint(err error) error {
 	if err == nil {
 		return nil
@@ -161,6 +191,13 @@ func classifyRunningExecutionConstraint(err error) error {
 		return fmt.Errorf("%w: %v", ErrRunningExecutionExists, err)
 	}
 	return err
+}
+
+func (s *Store) GetLatestTaskExecution(taskID int64) (*domain.Execution, error) {
+	return scanExecution(s.db.QueryRow(
+		executionSelect+` WHERE task_id = ? ORDER BY id DESC LIMIT 1`,
+		taskID,
+	))
 }
 
 func (s *Store) ListTaskExecutions(taskID int64) ([]*domain.Execution, error) {

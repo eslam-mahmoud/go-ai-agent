@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/eslam-mahmoud/go-ai-agent/internal/app"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/claude"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/config"
 	githubclient "github.com/eslam-mahmoud/go-ai-agent/internal/github"
@@ -69,17 +71,42 @@ func main() {
 		os.Exit(1)
 	}
 
+	if *showStatus {
+		s, err := store.OpenReadOnly(cfg.DBPath)
+		if err != nil {
+			log.Error("failed to open store for status", "err", err)
+			os.Exit(1)
+		}
+		printStatus(s, cfg)
+		_ = s.Close()
+		return
+	}
+
+	instanceLock, err := app.AcquireInstanceLock(cfg.DBPath)
+	if err != nil {
+		if errors.Is(err, app.ErrAlreadyLocked) {
+			log.Error("another Madar daemon is already using this database",
+				"db", cfg.DBPath, "err", err)
+		} else {
+			log.Error("failed to acquire single-instance lock",
+				"db", cfg.DBPath, "err", err)
+		}
+		os.Exit(1)
+	}
+	defer func() {
+		if err := instanceLock.Release(); err != nil {
+			log.Error("failed to release instance lock", "path", instanceLock.Path(), "err", err)
+		}
+	}()
+	log.Info("single-instance lock acquired",
+		"path", instanceLock.Path(), "pid", os.Getpid())
+
 	s, err := store.Open(cfg.DBPath)
 	if err != nil {
 		log.Error("failed to open store", "err", err)
 		os.Exit(1)
 	}
 	defer s.Close()
-
-	if *showStatus {
-		printStatus(s, cfg)
-		os.Exit(0)
-	}
 
 	ghClient := githubclient.New(cfg.GitHub.Token)
 	runner := claude.New(cfg.Claude.Bin)

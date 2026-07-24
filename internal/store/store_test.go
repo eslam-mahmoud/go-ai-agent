@@ -1,6 +1,7 @@
 package store
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -111,6 +112,45 @@ func TestOpen_createsParentDirs(t *testing.T) {
 		t.Fatalf("Open with non-existent parent dir: %v", err)
 	}
 	s.Close()
+}
+
+func TestOpenReadOnlyReadsExistingDatabaseWithoutWrites(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	writer, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := writer.UpsertTask("owner/repo", 42, StateInProgress, "session"); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	defer writer.Close()
+
+	reader, err := OpenReadOnly(path)
+	if err != nil {
+		t.Fatalf("OpenReadOnly: %v", err)
+	}
+	defer reader.Close()
+
+	task, err := reader.GetTask("owner/repo", 42)
+	if err != nil {
+		t.Fatalf("GetTask through read-only store: %v", err)
+	}
+	if task == nil || task.SessionID != "session" {
+		t.Errorf("read-only task = %#v", task)
+	}
+	if _, err := reader.UpsertTask("owner/repo", 43, StateReady, ""); err == nil {
+		t.Fatal("write through read-only store unexpectedly succeeded")
+	}
+}
+
+func TestOpenReadOnlyDoesNotCreateMissingDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing", "test.db")
+	if _, err := OpenReadOnly(path); err == nil {
+		t.Fatal("OpenReadOnly created or opened a missing database")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("missing database exists after OpenReadOnly: %v", err)
+	}
 }
 
 func TestMigration_setsVersion(t *testing.T) {

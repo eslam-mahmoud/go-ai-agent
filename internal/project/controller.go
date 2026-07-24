@@ -28,6 +28,7 @@ type Store interface {
 	ResumeProject(projectID int64, target domain.ProjectState) error
 	CancelProjectTask(update store.ProjectTaskCancellation) error
 	GetLatestTaskExecution(taskID int64) (*domain.Execution, error)
+	ListTaskExecutions(taskID int64) ([]*domain.Execution, error)
 	RetryProjectTaskExecution(
 		update store.ProjectExecutionRetry,
 	) (*domain.Execution, error)
@@ -452,6 +453,47 @@ func (controller *Controller) ApplyTaskTransition(
 		)
 	}
 	return task.Status, nil
+}
+
+// ReviewFixCycleCount restores the bounded repair budget from immutable
+// execution history. Only completed Fixer executions consume a cycle.
+func (controller *Controller) ReviewFixCycleCount(
+	projectID, taskID int64,
+) (int, error) {
+	task, err := controller.store.GetProjectTaskByID(taskID)
+	if err != nil {
+		return 0, err
+	}
+	if task == nil {
+		return 0, fmt.Errorf("%w: task %d in project %d", ErrTaskNotFound, taskID, projectID)
+	}
+	if task.ProjectID != projectID {
+		return 0, fmt.Errorf(
+			"%w: task %d belongs to project %d, not %d",
+			ErrTaskOwnership,
+			taskID,
+			task.ProjectID,
+			projectID,
+		)
+	}
+	if _, err := controller.TaskStatus(projectID, taskID); err != nil {
+		return 0, err
+	}
+	executions, err := controller.store.ListTaskExecutions(taskID)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, execution := range executions {
+		if execution != nil &&
+			execution.ProjectID == projectID &&
+			execution.TaskID == taskID &&
+			execution.Mode == string(workflow.ModeFixer) &&
+			execution.Status == domain.ExecutionCompleted {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func deriveProjectState(

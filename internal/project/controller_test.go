@@ -160,6 +160,67 @@ func TestControllerManagerReviewRequired(t *testing.T) {
 	}
 }
 
+func TestControllerReviewFixCycleCountUsesCompletedExecutionHistory(t *testing.T) {
+	s := openControllerStore(t)
+	project, task := createControllerProjectTask(
+		t,
+		s,
+		"owner/review-fix-count",
+		domain.TaskReviewing,
+	)
+	for attempt, status := range []domain.ExecutionStatus{
+		domain.ExecutionCompleted,
+		domain.ExecutionCompleted,
+		domain.ExecutionFailed,
+	} {
+		execution := domain.NewExecution(
+			project.ID,
+			task.ID,
+			string(workflow.ModeFixer),
+			"codex",
+			"",
+			attempt+1,
+		)
+		execution.Status = status
+		if _, err := s.CreateExecution(execution); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reviewer := domain.NewExecution(
+		project.ID,
+		task.ID,
+		string(workflow.ModeReviewer),
+		"claude",
+		"",
+		1,
+	)
+	reviewer.Status = domain.ExecutionCompleted
+	if _, err := s.CreateExecution(reviewer); err != nil {
+		t.Fatal(err)
+	}
+
+	controller, err := NewController(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count, err := controller.ReviewFixCycleCount(project.ID, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("completed fix cycles = %d, want 2", count)
+	}
+	otherProject, _ := createControllerProjectTask(
+		t,
+		s,
+		"owner/review-fix-other",
+		domain.TaskQueued,
+	)
+	if _, err := controller.ReviewFixCycleCount(otherProject.ID, task.ID); !errors.Is(err, ErrTaskOwnership) {
+		t.Fatalf("cross-project count error = %v", err)
+	}
+}
+
 func TestDeriveProjectState(t *testing.T) {
 	taskID := int64(9)
 	project := domain.NewProject("owner/repo", "Project", "Goal", "")

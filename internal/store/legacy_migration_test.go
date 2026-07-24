@@ -51,7 +51,7 @@ func TestMigrateLegacyProjectCopiesStateAndIsIdempotent(t *testing.T) {
 	waiting, err := s.BindTaskExecution(
 		"owner/repo",
 		40,
-		StateAwaitingFeedback,
+		StateDone,
 		ExecutionBinding{
 			Engine:            "claude",
 			ProviderSessionID: "waiting-session",
@@ -98,7 +98,7 @@ func TestMigrateLegacyProjectCopiesStateAndIsIdempotent(t *testing.T) {
 		domain.TaskQueued,
 		domain.TaskCompleted,
 		domain.TaskDeveloping,
-		domain.TaskWaitingInput,
+		domain.TaskCompleted,
 	}
 	legacyRows := []*Task{ready, done, active, waiting}
 	for index, task := range tasks {
@@ -146,11 +146,11 @@ func TestMigrateLegacyProjectCopiesStateAndIsIdempotent(t *testing.T) {
 		t,
 		s,
 		tasks[3].ID,
-		domain.ExecutionInterrupted,
+		domain.ExecutionCompleted,
 		"claude",
 		"",
 		"waiting-session",
-		false,
+		true,
 	)
 	if executions, err := s.ListTaskExecutions(tasks[0].ID); err != nil || len(executions) != 0 {
 		t.Fatalf("ready task executions = %#v, error=%v", executions, err)

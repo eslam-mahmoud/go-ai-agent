@@ -148,7 +148,7 @@ func (s *Store) ApplyProjectTaskTransition(
 		WHERE id = ? AND project_id = ? AND status = ?
 	`, string(update.NewStatus), now, update.TaskID, update.ProjectID, string(update.ExpectedStatus))
 	if err != nil {
-		return fmt.Errorf("update transitioned task: %w", err)
+		return fmt.Errorf("update transitioned task: %w", classifyActiveTaskConstraint(err))
 	}
 	if changed, err := result.RowsAffected(); err != nil {
 		return fmt.Errorf("read transitioned task count: %w", err)

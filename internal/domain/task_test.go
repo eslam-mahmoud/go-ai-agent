@@ -42,6 +42,43 @@ func TestTaskStatuses(t *testing.T) {
 	}
 }
 
+func TestActiveTaskStatuses(t *testing.T) {
+	active := map[TaskStatus]bool{
+		TaskSelected:     true,
+		TaskPlanning:     true,
+		TaskWaitingInput: true,
+		TaskDeveloping:   true,
+		TaskReviewing:    true,
+		TaskFixing:       true,
+		TaskVerifying:    true,
+		TaskWaitingCI:    true,
+		TaskBlocked:      true,
+	}
+	for _, status := range []TaskStatus{
+		TaskProposed,
+		TaskQueued,
+		TaskSelected,
+		TaskPlanning,
+		TaskWaitingInput,
+		TaskDeveloping,
+		TaskReviewing,
+		TaskFixing,
+		TaskVerifying,
+		TaskWaitingCI,
+		TaskBlocked,
+		TaskCompleted,
+		TaskCancelled,
+		TaskDeferred,
+	} {
+		if got := status.Active(); got != active[status] {
+			t.Errorf("%q Active() = %t, want %t", status, got, active[status])
+		}
+	}
+	if TaskStatus("unknown").Active() {
+		t.Error("unknown status is active")
+	}
+}
+
 func TestTaskValidationRejectsInvalidRecords(t *testing.T) {
 	valid := *NewTask(7, "Task", "Goal")
 	zero := int64(0)

@@ -560,6 +560,16 @@ var migrations = []struct {
 		CREATE INDEX idx_legacy_project_migrations_project
 			ON legacy_project_migrations(project_id, legacy_task_id);
 	`},
+	// v9: one Madar instance owns one global v2 delivery lane. An expression
+	// index makes active status uniqueness independent of project identity.
+	{9, `
+		CREATE UNIQUE INDEX idx_project_tasks_single_active
+			ON project_tasks((1))
+			WHERE status IN (
+				'selected', 'planning', 'waiting-input', 'developing',
+				'reviewing', 'fixing', 'verifying', 'waiting-ci', 'blocked'
+			);
+	`},
 }
 
 func (s *Store) migrate() error {

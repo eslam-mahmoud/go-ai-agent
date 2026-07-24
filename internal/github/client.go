@@ -31,6 +31,8 @@ type Comment struct {
 type Client interface {
 	GetAuthenticatedUsername(ctx context.Context) (string, error)
 	ListReadyIssues(ctx context.Context, owner, repo, readyLabel string) ([]*Issue, error)
+	// ListOpenIssues returns every open issue, excluding pull requests.
+	ListOpenIssues(ctx context.Context, owner, repo string) ([]*Issue, error)
 	GetIssue(ctx context.Context, owner, repo string, number int) (*Issue, error)
 	GetComments(ctx context.Context, owner, repo string, number int, since *time.Time) ([]*Comment, error)
 	PostComment(ctx context.Context, owner, repo string, number int, body string) (*Comment, error)
@@ -120,6 +122,31 @@ func (c *githubClient) ListReadyIssues(ctx context.Context, owner, repo, readyLa
 		ghIssues, resp, err := c.gh.Issues.ListByRepo(ctx, owner, repo, opts)
 		if err := c.logRateLimit(resp, err); err != nil {
 			return nil, fmt.Errorf("list issues: %w", err)
+		}
+		for _, i := range ghIssues {
+			if i.PullRequestLinks != nil {
+				continue // skip PRs
+			}
+			issues = append(issues, toIssue(i))
+		}
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return issues, nil
+}
+
+func (c *githubClient) ListOpenIssues(ctx context.Context, owner, repo string) ([]*Issue, error) {
+	opts := &gh.IssueListByRepoOptions{
+		State:       "open",
+		ListOptions: gh.ListOptions{PerPage: 100},
+	}
+	var issues []*Issue
+	for {
+		ghIssues, resp, err := c.gh.Issues.ListByRepo(ctx, owner, repo, opts)
+		if err := c.logRateLimit(resp, err); err != nil {
+			return nil, fmt.Errorf("list open issues: %w", err)
 		}
 		for _, i := range ghIssues {
 			if i.PullRequestLinks != nil {

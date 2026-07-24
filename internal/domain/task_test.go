@@ -109,3 +109,31 @@ func TestTaskValidationRejectsInvalidRecords(t *testing.T) {
 		t.Errorf("nil Validate error = %v", err)
 	}
 }
+
+func TestTaskDependenciesSatisfiedFailsClosed(t *testing.T) {
+	cases := []struct {
+		state string
+		want  bool
+	}{
+		{"", true},
+		{"  ", true},
+		{"none", true},
+		{"Met", true},
+		{"RESOLVED", true},
+		{" satisfied ", true},
+		{"blocked-by:12", false},
+		{"waiting", false},
+		{"unknown", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.state, func(t *testing.T) {
+			task := &Task{DependencyState: tc.state}
+			if got := task.DependenciesSatisfied(); got != tc.want {
+				t.Errorf("DependenciesSatisfied() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if (*Task)(nil).DependenciesSatisfied() {
+		t.Error("nil task reported satisfied dependencies")
+	}
+}

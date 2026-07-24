@@ -62,6 +62,10 @@ func TestProjectValidationRejectsInvalidRecords(t *testing.T) {
 		{"missing name", func(p *Project) { p.Name = "" }},
 		{"missing goal", func(p *Project) { p.Goal = "" }},
 		{"invalid state", func(p *Project) { p.State = "invalid" }},
+		{"paused without prior state", func(p *Project) { p.State = ProjectPaused }},
+		{"invalid prior state", func(p *Project) { p.PausedFromState = "invalid" }},
+		{"paused prior state", func(p *Project) { p.PausedFromState = ProjectPaused }},
+		{"active with prior state", func(p *Project) { p.PausedFromState = ProjectExecuting }},
 		{"invalid health", func(p *Project) { p.Health = "invalid" }},
 		{"negative parent issue", func(p *Project) { p.ParentIssueNumber = -1 }},
 		{"nonpositive current task", func(p *Project) { p.CurrentTaskID = &zero }},
@@ -79,5 +83,14 @@ func TestProjectValidationRejectsInvalidRecords(t *testing.T) {
 	}
 	if err := (*Project)(nil).Validate(); !errors.Is(err, ErrInvalidProject) {
 		t.Errorf("nil Validate error = %v", err)
+	}
+}
+
+func TestPausedProjectValidation(t *testing.T) {
+	project := NewProject("owner/repo", "Madar", "Ship v2", "scope")
+	project.State = ProjectPaused
+	project.PausedFromState = ProjectExecuting
+	if err := project.Validate(); err != nil {
+		t.Fatalf("valid paused project: %v", err)
 	}
 }

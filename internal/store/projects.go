@@ -42,11 +42,11 @@ func (s *Store) CreateProject(project *domain.Project) (*domain.Project, error) 
 	now := time.Now().UTC()
 	result, err := tx.Exec(`
 		INSERT INTO projects (
-			repo, parent_issue_number, name, goal, scope, state, health,
+			repo, parent_issue_number, name, goal, scope, state, paused_from_state, health,
 			current_task_id, current_plan_version, architecture_version,
 			release_target, release_readiness, last_manager_review_at,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		project.Repo,
 		project.ParentIssueNumber,
@@ -54,6 +54,7 @@ func (s *Store) CreateProject(project *domain.Project) (*domain.Project, error) 
 		project.Goal,
 		project.Scope,
 		string(project.State),
+		string(project.PausedFromState),
 		string(project.Health),
 		nullableInt64(project.CurrentTaskID),
 		project.CurrentPlanVersion,
@@ -127,6 +128,7 @@ func (s *Store) UpdateProject(project *domain.Project) (*domain.Project, error) 
 			goal = ?,
 			scope = ?,
 			state = ?,
+			paused_from_state = ?,
 			health = ?,
 			current_task_id = ?,
 			current_plan_version = ?,
@@ -143,6 +145,7 @@ func (s *Store) UpdateProject(project *domain.Project) (*domain.Project, error) 
 		project.Goal,
 		project.Scope,
 		string(project.State),
+		string(project.PausedFromState),
 		string(project.Health),
 		nullableInt64(project.CurrentTaskID),
 		project.CurrentPlanVersion,
@@ -193,7 +196,7 @@ func (s *Store) ListProjects() ([]*domain.Project, error) {
 
 const projectSelect = `
 	SELECT
-		id, repo, parent_issue_number, name, goal, scope, state, health,
+		id, repo, parent_issue_number, name, goal, scope, state, paused_from_state, health,
 		current_task_id, current_plan_version, architecture_version,
 		release_target, release_readiness, last_manager_review_at,
 		created_at, updated_at
@@ -204,6 +207,7 @@ func scanProject(row scanner) (*domain.Project, error) {
 	var (
 		project       domain.Project
 		state         string
+		pausedFrom    string
 		health        string
 		currentTaskID sql.NullInt64
 		lastReviewAt  sql.NullTime
@@ -216,6 +220,7 @@ func scanProject(row scanner) (*domain.Project, error) {
 		&project.Goal,
 		&project.Scope,
 		&state,
+		&pausedFrom,
 		&health,
 		&currentTaskID,
 		&project.CurrentPlanVersion,
@@ -232,6 +237,7 @@ func scanProject(row scanner) (*domain.Project, error) {
 		return nil, fmt.Errorf("scan project: %w", err)
 	}
 	project.State = domain.ProjectState(state)
+	project.PausedFromState = domain.ProjectState(pausedFrom)
 	project.Health = domain.ProjectHealth(health)
 	if currentTaskID.Valid {
 		value := currentTaskID.Int64

@@ -187,29 +187,55 @@ func TestRunningExecutionMigrationRejectsExistingConflictAtomically(t *testing.T
 			t.Fatal(err)
 		}
 	}
-	v9 := &Store{db: db}
-	project, err := v9.CreateProject(domain.NewProject("owner/v9", "V9", "Goal", ""))
+	result, err := db.Exec(`
+		INSERT INTO projects (
+			repo, name, goal, state, health, created_at, updated_at
+		) VALUES ('owner/v9', 'V9', 'Goal', 'initializing', 'on-track',
+			CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+	`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	first := domain.NewTask(project.ID, "First", "Goal")
-	first.Status = domain.TaskQueued
-	first, err = v9.CreateProjectTask(first)
+	projectID, err := result.LastInsertId()
 	if err != nil {
 		t.Fatal(err)
 	}
-	second := domain.NewTask(project.ID, "Second", "Goal")
-	second.Status = domain.TaskQueued
-	second, err = v9.CreateProjectTask(second)
+	result, err = db.Exec(`
+		INSERT INTO project_tasks (
+			project_id, title, goal, status, sequence, created_at, updated_at
+		) VALUES (?, 'First', 'Goal', 'queued', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+	`, projectID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, candidate := range []*domain.Execution{
-		domain.NewExecution(project.ID, first.ID, "planner", "codex", "", 1),
-		domain.NewExecution(project.ID, second.ID, "developer", "codex", "", 1),
+	firstTaskID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err = db.Exec(`
+		INSERT INTO project_tasks (
+			project_id, title, goal, status, sequence, created_at, updated_at
+		) VALUES (?, 'Second', 'Goal', 'queued', 2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+	`, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondTaskID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range []struct {
+		taskID int64
+		mode   string
+	}{
+		{firstTaskID, "planner"},
+		{secondTaskID, "developer"},
 	} {
-		candidate.Status = domain.ExecutionRunning
-		if _, err := v9.CreateExecution(candidate); err != nil {
+		if _, err := db.Exec(`
+			INSERT INTO executions (
+				project_id, task_id, mode, engine, attempt, status
+			) VALUES (?, ?, ?, 'codex', 1, 'running')
+		`, projectID, candidate.taskID, candidate.mode); err != nil {
 			t.Fatal(err)
 		}
 	}

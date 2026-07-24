@@ -9,7 +9,10 @@ import (
 	"github.com/eslam-mahmoud/go-ai-agent/internal/domain"
 )
 
-var ErrProjectTaskTransitionConflict = errors.New("project task transition conflict")
+var (
+	ErrProjectTaskTransitionConflict = errors.New("project task transition conflict")
+	ErrProjectPaused                 = errors.New("project is paused")
+)
 
 type ProjectAggregate struct {
 	Project             *domain.Project
@@ -111,11 +114,13 @@ func (s *Store) ApplyProjectTaskTransition(
 	defer tx.Rollback()
 	var storedProjectID int64
 	var storedStatus string
+	var projectState string
 	err = tx.QueryRow(`
-		SELECT project_id, status
-		FROM project_tasks
-		WHERE id = ?
-	`, update.TaskID).Scan(&storedProjectID, &storedStatus)
+		SELECT task.project_id, task.status, project.state
+		FROM project_tasks task
+		JOIN projects project ON project.id = task.project_id
+		WHERE task.id = ?
+	`, update.TaskID).Scan(&storedProjectID, &storedStatus, &projectState)
 	if err == sql.ErrNoRows {
 		return fmt.Errorf("%w: ID %d", ErrProjectTaskNotFound, update.TaskID)
 	}
@@ -130,6 +135,9 @@ func (s *Store) ApplyProjectTaskTransition(
 			storedProjectID,
 			update.ProjectID,
 		)
+	}
+	if domain.ProjectState(projectState) == domain.ProjectPaused {
+		return fmt.Errorf("%w: project %d", ErrProjectPaused, update.ProjectID)
 	}
 	if domain.TaskStatus(storedStatus) != update.ExpectedStatus {
 		return fmt.Errorf(

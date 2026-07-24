@@ -40,6 +40,7 @@ type Project struct {
 	Goal                string
 	Scope               string
 	State               ProjectState
+	PausedFromState     ProjectState
 	Health              ProjectHealth
 	CurrentTaskID       *int64
 	CurrentPlanVersion  int
@@ -106,6 +107,17 @@ func (project *Project) Validate() error {
 		return fmt.Errorf("%w: goal is required", ErrInvalidProject)
 	case !project.State.Valid():
 		return fmt.Errorf("%w: unknown state %q", ErrInvalidProject, project.State)
+	case project.PausedFromState != "" &&
+		(!project.PausedFromState.Valid() || project.PausedFromState == ProjectPaused):
+		return fmt.Errorf(
+			"%w: invalid pre-pause state %q",
+			ErrInvalidProject,
+			project.PausedFromState,
+		)
+	case project.State == ProjectPaused && project.PausedFromState == "":
+		return fmt.Errorf("%w: paused project requires its prior state", ErrInvalidProject)
+	case project.State != ProjectPaused && project.PausedFromState != "":
+		return fmt.Errorf("%w: active project cannot retain a pre-pause state", ErrInvalidProject)
 	case !project.Health.Valid():
 		return fmt.Errorf("%w: unknown health %q", ErrInvalidProject, project.Health)
 	case project.ParentIssueNumber < 0:

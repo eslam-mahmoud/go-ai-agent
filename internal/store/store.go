@@ -578,6 +578,28 @@ var migrations = []struct {
 			ON executions((1))
 			WHERE status = 'running';
 	`},
+	// v11: retain the exact lifecycle state that a pause interrupted. This
+	// makes resume deterministic after restarts instead of inferring intent.
+	{11, `
+		ALTER TABLE projects
+			ADD COLUMN paused_from_state TEXT NOT NULL DEFAULT ''
+			CHECK (
+				paused_from_state IN (
+					'', 'initializing', 'planning', 'executing',
+					'blocked', 'release-review', 'completed'
+				)
+			);
+		UPDATE projects
+		SET paused_from_state = CASE
+			WHEN EXISTS (
+				SELECT 1 FROM project_tasks
+				WHERE id = projects.current_task_id AND status = 'blocked'
+			) THEN 'blocked'
+			WHEN current_task_id IS NOT NULL THEN 'executing'
+			ELSE 'planning'
+		END
+		WHERE state = 'paused';
+	`},
 }
 
 func (s *Store) migrate() error {

@@ -128,6 +128,7 @@ Claude is instructed to create a branch named exactly `madar/issue-<N>` and incl
 |---|---|---|
 | **Orchestrator** | `internal/orchestrator/loop.go` | Provider-neutral task execution, state transitions, and CI feedback |
 | **Project Domain** | `internal/domain/` | Project, task, execution, artifact, and manager-review records |
+| **Project Controller** | `internal/project/` | Consistent aggregate snapshots, validated task mutations, and derived project state |
 | **Engine Kernel** | `internal/engine/` | Provider-neutral contracts, registry, local JSON Schema validation, and errors |
 | **Claude Adapter** | `internal/engine/claude/adapter.go` | Spawn `claude`, parse `stream-json`, and normalize provider behavior |
 | **Codex Adapter** | `internal/engine/codex/adapter.go` | Run `codex exec`/`resume`, parse JSONL, and normalize provider behavior |

@@ -32,13 +32,18 @@ var (
 	ErrUnsupportedFeatureState = errors.New("unsupported feature workflow state")
 	ErrInvalidModeOutcome      = errors.New("invalid mode outcome")
 	ErrFeatureStepLimit        = errors.New("feature workflow step limit reached")
+	ErrInvalidReviewFixCount   = errors.New("invalid persisted review/fix cycle count")
 )
 
+const DefaultMaxReviewFixCycles = 2
+
 type ModeRequest struct {
-	ProjectID int64
-	TaskID    int64
-	Mode      ModeName
-	Status    domain.TaskStatus
+	ProjectID    int64
+	TaskID       int64
+	Mode         ModeName
+	Status       domain.TaskStatus
+	FixCycle     int
+	MaxFixCycles int
 }
 
 type ModeOutcome struct {
@@ -62,14 +67,25 @@ type TaskController interface {
 	) (domain.TaskStatus, error)
 }
 
+// ReviewFixCycleCounter lets production controllers restore the repair budget
+// from durable execution history. Controllers without this optional interface
+// begin at zero for compatibility with isolated workflow uses.
+type ReviewFixCycleCounter interface {
+	ReviewFixCycleCount(projectID, taskID int64) (int, error)
+}
+
 type FeatureOptions struct {
-	CIRequired bool
-	MaxSteps   int
+	CIRequired         bool
+	MaxSteps           int
+	MaxReviewFixCycles int
 }
 
 type FeatureResult struct {
-	FinalStatus domain.TaskStatus
-	ModesRun    []ModeName
+	FinalStatus           domain.TaskStatus
+	ModesRun              []ModeName
+	ReviewFixCycles       int
+	MaxReviewFixCycles    int
+	ReviewFixLimitReached bool
 }
 
 type FeatureWorkflow struct {
@@ -92,8 +108,14 @@ func NewFeatureWorkflow(
 	if options.MaxSteps < 0 {
 		return nil, errors.New("feature workflow max steps cannot be negative")
 	}
+	if options.MaxReviewFixCycles < 0 {
+		return nil, errors.New("feature workflow max review/fix cycles cannot be negative")
+	}
 	if options.MaxSteps == 0 {
 		options.MaxSteps = 100
+	}
+	if options.MaxReviewFixCycles == 0 {
+		options.MaxReviewFixCycles = DefaultMaxReviewFixCycles
 	}
 	return &FeatureWorkflow{controller: controller, runner: runner, options: options}, nil
 }
@@ -106,7 +128,20 @@ func (workflow *FeatureWorkflow) Run(
 	if err != nil {
 		return nil, err
 	}
-	result := &FeatureResult{}
+	result := &FeatureResult{MaxReviewFixCycles: workflow.options.MaxReviewFixCycles}
+	if counter, ok := workflow.controller.(ReviewFixCycleCounter); ok {
+		result.ReviewFixCycles, err = counter.ReviewFixCycleCount(projectID, taskID)
+		if err != nil {
+			return nil, fmt.Errorf("load review/fix cycle count: %w", err)
+		}
+		if result.ReviewFixCycles < 0 {
+			return nil, fmt.Errorf(
+				"%w: %d",
+				ErrInvalidReviewFixCount,
+				result.ReviewFixCycles,
+			)
+		}
+	}
 	for step := 0; step < workflow.options.MaxSteps; step++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -134,9 +169,13 @@ func (workflow *FeatureWorkflow) Run(
 				ctx, projectID, taskID, status, ModeReviewer, result,
 			)
 		case domain.TaskFixing:
-			status, err = workflow.runMode(
-				ctx, projectID, taskID, status, ModeFixer, result,
-			)
+			if workflow.fixLimitReached(result) {
+				status, err = workflow.blockForFixLimit(projectID, taskID, result)
+			} else {
+				status, err = workflow.runMode(
+					ctx, projectID, taskID, status, ModeFixer, result,
+				)
+			}
 		case domain.TaskVerifying:
 			status, err = workflow.runMode(
 				ctx, projectID, taskID, status, ModeVerifier, result,
@@ -158,11 +197,17 @@ func (workflow *FeatureWorkflow) runMode(
 	mode ModeName,
 	result *FeatureResult,
 ) (domain.TaskStatus, error) {
+	fixCycle := result.ReviewFixCycles
+	if mode == ModeFixer {
+		fixCycle++
+	}
 	outcome, err := workflow.runner.RunMode(ctx, ModeRequest{
-		ProjectID: projectID,
-		TaskID:    taskID,
-		Mode:      mode,
-		Status:    current,
+		ProjectID:    projectID,
+		TaskID:       taskID,
+		Mode:         mode,
+		Status:       current,
+		FixCycle:     fixCycle,
+		MaxFixCycles: workflow.options.MaxReviewFixCycles,
 	})
 	if err != nil {
 		return current, fmt.Errorf("run %s mode: %w", mode, err)
@@ -190,17 +235,13 @@ func (workflow *FeatureWorkflow) runMode(
 	case ModeFailed:
 		switch current {
 		case domain.TaskReviewing:
-			return workflow.transition(
-				projectID,
-				taskID,
-				domain.TaskFixing,
+			return workflow.routeToFix(
+				projectID, taskID, result,
 				TaskTransitionEvidence{BlockingReviewFindings: true},
 			)
 		case domain.TaskVerifying:
-			return workflow.transition(
-				projectID,
-				taskID,
-				domain.TaskFixing,
+			return workflow.routeToFix(
+				projectID, taskID, result,
 				TaskTransitionEvidence{VerificationFailed: true},
 			)
 		default:
@@ -227,10 +268,8 @@ func (workflow *FeatureWorkflow) runMode(
 		)
 	case domain.TaskReviewing:
 		if outcome.BlockingFindings {
-			return workflow.transition(
-				projectID,
-				taskID,
-				domain.TaskFixing,
+			return workflow.routeToFix(
+				projectID, taskID, result,
 				TaskTransitionEvidence{BlockingReviewFindings: true},
 			)
 		}
@@ -238,6 +277,7 @@ func (workflow *FeatureWorkflow) runMode(
 			projectID, taskID, domain.TaskVerifying, TaskTransitionEvidence{},
 		)
 	case domain.TaskFixing:
+		result.ReviewFixCycles = fixCycle
 		return workflow.transition(
 			projectID, taskID, domain.TaskReviewing, TaskTransitionEvidence{},
 		)
@@ -259,6 +299,34 @@ func (workflow *FeatureWorkflow) runMode(
 	default:
 		return current, fmt.Errorf("%w: %s", ErrUnsupportedFeatureState, current)
 	}
+}
+
+func (workflow *FeatureWorkflow) routeToFix(
+	projectID, taskID int64,
+	result *FeatureResult,
+	evidence TaskTransitionEvidence,
+) (domain.TaskStatus, error) {
+	if workflow.fixLimitReached(result) {
+		return workflow.blockForFixLimit(projectID, taskID, result)
+	}
+	return workflow.transition(projectID, taskID, domain.TaskFixing, evidence)
+}
+
+func (workflow *FeatureWorkflow) fixLimitReached(result *FeatureResult) bool {
+	return result.ReviewFixCycles >= workflow.options.MaxReviewFixCycles
+}
+
+func (workflow *FeatureWorkflow) blockForFixLimit(
+	projectID, taskID int64,
+	result *FeatureResult,
+) (domain.TaskStatus, error) {
+	result.ReviewFixLimitReached = true
+	return workflow.transition(
+		projectID,
+		taskID,
+		domain.TaskBlocked,
+		TaskTransitionEvidence{ReviewFixLimitReached: true},
+	)
 }
 
 func (workflow *FeatureWorkflow) transition(

@@ -6,6 +6,7 @@ import (
 	"reflect"
 
 	"github.com/eslam-mahmoud/go-ai-agent/internal/engine"
+	"github.com/eslam-mahmoud/go-ai-agent/internal/workflow"
 )
 
 func validateCompletedModeArtifact(
@@ -31,6 +32,14 @@ func validateCompletedModeArtifact(
 		)
 	}
 	return append(json.RawMessage(nil), result.OutputJSON...), &envelope, nil
+}
+
+func compileBuiltinValidator(name workflow.ModeName) (*engine.OutputValidator, error) {
+	definition, err := BuiltinDefinition(name)
+	if err != nil {
+		return nil, err
+	}
+	return engine.CompileOutputSchema(definition.OutputSchema)
 }
 
 func cloneEngineResult(result *engine.Result) *engine.Result {

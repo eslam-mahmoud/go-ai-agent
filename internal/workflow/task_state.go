@@ -28,6 +28,7 @@ type TaskTransitionEvidence struct {
 	CIRequired              bool `json:"ci_required"`
 	CIPassed                bool `json:"ci_passed"`
 	CIFailed                bool `json:"ci_failed"`
+	ReviewFixLimitReached   bool `json:"review_fix_limit_reached"`
 	BlockerResolved         bool `json:"blocker_resolved"`
 	Reprioritized           bool `json:"reprioritized"`
 }

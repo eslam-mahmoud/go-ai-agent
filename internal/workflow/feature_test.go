@@ -104,6 +104,159 @@ func TestFeatureWorkflowReviewAndVerificationFixCycles(t *testing.T) {
 	})
 }
 
+func TestFeatureWorkflowBoundedReviewFixCycles(t *testing.T) {
+	t.Run("default allows two fixes and final review", func(t *testing.T) {
+		controller := &fakeFeatureController{status: domain.TaskReviewing}
+		runner := &fakeModeRunner{outcomes: []ModeOutcome{
+			{Status: ModeCompleted, BlockingFindings: true},
+			{Status: ModeCompleted},
+			{Status: ModeCompleted, BlockingFindings: true},
+			{Status: ModeCompleted},
+			{Status: ModeCompleted, BlockingFindings: true},
+		}}
+		feature, err := NewFeatureWorkflow(controller, runner, FeatureOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := feature.Run(context.Background(), 1, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.FinalStatus != domain.TaskBlocked ||
+			result.ReviewFixCycles != 2 ||
+			result.MaxReviewFixCycles != DefaultMaxReviewFixCycles ||
+			!result.ReviewFixLimitReached {
+			t.Fatalf("result = %#v", result)
+		}
+		wantModes := []ModeName{
+			ModeReviewer, ModeFixer, ModeReviewer, ModeFixer, ModeReviewer,
+		}
+		if !reflect.DeepEqual(result.ModesRun, wantModes) {
+			t.Fatalf("modes = %v, want %v", result.ModesRun, wantModes)
+		}
+		wantTransitions := []domain.TaskStatus{
+			domain.TaskFixing,
+			domain.TaskReviewing,
+			domain.TaskFixing,
+			domain.TaskReviewing,
+			domain.TaskBlocked,
+		}
+		if !reflect.DeepEqual(controller.transitions, wantTransitions) {
+			t.Fatalf("transitions = %v, want %v", controller.transitions, wantTransitions)
+		}
+		if len(controller.evidence) != len(wantTransitions) ||
+			!controller.evidence[len(controller.evidence)-1].ReviewFixLimitReached {
+			t.Fatalf("transition evidence = %#v", controller.evidence)
+		}
+		if runner.requests[1].FixCycle != 1 ||
+			runner.requests[3].FixCycle != 2 {
+			t.Fatalf("fix requests = %#v", runner.requests)
+		}
+		for _, request := range runner.requests {
+			if request.MaxFixCycles != DefaultMaxReviewFixCycles {
+				t.Fatalf("request budget = %#v", request)
+			}
+		}
+	})
+
+	t.Run("persisted cycle survives workflow restart", func(t *testing.T) {
+		controller := &fakeFeatureController{
+			status:    domain.TaskReviewing,
+			fixCycles: 1,
+		}
+		runner := &fakeModeRunner{outcomes: []ModeOutcome{
+			{Status: ModeCompleted, BlockingFindings: true},
+			{Status: ModeCompleted},
+			{Status: ModeCompleted, BlockingFindings: true},
+		}}
+		feature, _ := NewFeatureWorkflow(
+			controller,
+			runner,
+			FeatureOptions{MaxReviewFixCycles: 2},
+		)
+		result, err := feature.Run(context.Background(), 1, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.ReviewFixCycles != 2 || !result.ReviewFixLimitReached {
+			t.Fatalf("result = %#v", result)
+		}
+		if len(runner.requests) != 3 ||
+			runner.requests[1].Mode != ModeFixer ||
+			runner.requests[1].FixCycle != 2 {
+			t.Fatalf("requests = %#v", runner.requests)
+		}
+	})
+
+	t.Run("already exhausted fixing state blocks before provider", func(t *testing.T) {
+		controller := &fakeFeatureController{
+			status:    domain.TaskFixing,
+			fixCycles: 2,
+		}
+		runner := &fakeModeRunner{}
+		feature, _ := NewFeatureWorkflow(
+			controller,
+			runner,
+			FeatureOptions{MaxReviewFixCycles: 2},
+		)
+		result, err := feature.Run(context.Background(), 1, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.FinalStatus != domain.TaskBlocked ||
+			!result.ReviewFixLimitReached ||
+			len(runner.requests) != 0 {
+			t.Fatalf("result=%#v requests=%#v", result, runner.requests)
+		}
+	})
+
+	t.Run("verification repair shares exhausted budget", func(t *testing.T) {
+		controller := &fakeFeatureController{
+			status:    domain.TaskVerifying,
+			fixCycles: 2,
+		}
+		runner := &fakeModeRunner{outcomes: []ModeOutcome{{Status: ModeFailed}}}
+		feature, _ := NewFeatureWorkflow(
+			controller,
+			runner,
+			FeatureOptions{MaxReviewFixCycles: 2},
+		)
+		result, err := feature.Run(context.Background(), 1, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.FinalStatus != domain.TaskBlocked ||
+			!result.ReviewFixLimitReached ||
+			!reflect.DeepEqual(result.ModesRun, []ModeName{ModeVerifier}) {
+			t.Fatalf("result = %#v", result)
+		}
+	})
+}
+
+func TestFeatureWorkflowReviewFixCycleConfigurationErrors(t *testing.T) {
+	controller := &fakeFeatureController{status: domain.TaskReviewing}
+	if feature, err := NewFeatureWorkflow(
+		controller,
+		&fakeModeRunner{},
+		FeatureOptions{MaxReviewFixCycles: -1},
+	); err == nil || feature != nil {
+		t.Fatalf("NewFeatureWorkflow = %#v, %v", feature, err)
+	}
+
+	countErr := errors.New("cycle history unavailable")
+	controller.countErr = countErr
+	feature, _ := NewFeatureWorkflow(controller, &fakeModeRunner{}, FeatureOptions{})
+	if _, err := feature.Run(context.Background(), 1, 2); !errors.Is(err, countErr) {
+		t.Fatalf("counter error = %v", err)
+	}
+
+	controller.countErr = nil
+	controller.fixCycles = -1
+	if _, err := feature.Run(context.Background(), 1, 2); !errors.Is(err, ErrInvalidReviewFixCount) {
+		t.Fatalf("negative count error = %v", err)
+	}
+}
+
 func TestFeatureWorkflowDurableStops(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -219,6 +372,9 @@ func TestFeatureWorkflowDefensiveStepLimit(t *testing.T) {
 type fakeFeatureController struct {
 	status      domain.TaskStatus
 	transitions []domain.TaskStatus
+	evidence    []TaskTransitionEvidence
+	fixCycles   int
+	countErr    error
 }
 
 func (controller *fakeFeatureController) TaskStatus(int64, int64) (domain.TaskStatus, error) {
@@ -239,7 +395,12 @@ func (controller *fakeFeatureController) ApplyTaskTransition(
 	}
 	controller.status = target
 	controller.transitions = append(controller.transitions, target)
+	controller.evidence = append(controller.evidence, evidence)
 	return target, nil
+}
+
+func (controller *fakeFeatureController) ReviewFixCycleCount(int64, int64) (int, error) {
+	return controller.fixCycles, controller.countErr
 }
 
 type fakeModeRunner struct {

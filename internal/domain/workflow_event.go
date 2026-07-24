@@ -29,6 +29,7 @@ const (
 	WorkflowExecutionInterrupted WorkflowEventType = "execution.interrupted"
 	WorkflowRecoveryDecided      WorkflowEventType = "recovery.decided"
 	WorkflowBacklogReordered     WorkflowEventType = "backlog.reordered"
+	WorkflowTaskSelected         WorkflowEventType = "task.selected"
 )
 
 var ErrInvalidWorkflowEvent = errors.New("invalid workflow event")

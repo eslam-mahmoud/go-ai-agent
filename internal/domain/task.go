@@ -102,6 +102,21 @@ func (status TaskStatus) Active() bool {
 	}
 }
 
+// DependenciesSatisfied reports whether the recorded dependency state allows a
+// task to start. Selection fails closed: an unrecognized state counts as
+// unresolved so unknown vocabulary can never promote ineligible work.
+func (task *Task) DependenciesSatisfied() bool {
+	if task == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(task.DependencyState)) {
+	case "", "none", "met", "resolved", "satisfied":
+		return true
+	default:
+		return false
+	}
+}
+
 // Validate checks record invariants, not lifecycle transitions.
 func (task *Task) Validate() error {
 	if task == nil {

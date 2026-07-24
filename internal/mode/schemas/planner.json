@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "summary",
+    "question",
+    "discoveries",
+    "risks",
+    "recommended_next_action",
+    "acceptance_criteria",
+    "implementation_steps",
+    "verification_commands",
+    "split_recommended"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["completed", "needs_input", "blocked", "failed"]
+    },
+    "summary": {"type": "string", "minLength": 1},
+    "question": {"type": ["string", "null"]},
+    "discoveries": {"type": "array", "items": {"type": "object"}},
+    "risks": {"type": "array", "items": {"type": "object"}},
+    "recommended_next_action": {"type": "string"},
+    "acceptance_criteria": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "implementation_steps": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "verification_commands": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "split_recommended": {"type": "boolean"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "needs_input"}}},
+      "then": {"properties": {"question": {"type": "string", "minLength": 1}}},
+      "else": {"properties": {"question": {"type": "null"}}}
+    }
+  ]
+}

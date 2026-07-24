@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "summary",
+    "question",
+    "discoveries",
+    "risks",
+    "recommended_next_action",
+    "acceptance_results",
+    "verification_commands",
+    "branch_consistent",
+    "pr_consistent",
+    "working_tree_clean",
+    "ci_passed",
+    "blocking_findings_remaining"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["completed", "needs_input", "blocked", "failed"]
+    },
+    "summary": {"type": "string", "minLength": 1},
+    "question": {"type": ["string", "null"]},
+    "discoveries": {"type": "array", "items": {"type": "object"}},
+    "risks": {"type": "array", "items": {"type": "object"}},
+    "recommended_next_action": {"type": "string"},
+    "acceptance_results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["criterion", "passed", "evidence"],
+        "properties": {
+          "criterion": {"type": "string", "minLength": 1},
+          "passed": {"type": "boolean"},
+          "evidence": {"type": "string"}
+        }
+      }
+    },
+    "verification_commands": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["command", "passed", "output"],
+        "properties": {
+          "command": {"type": "string", "minLength": 1},
+          "passed": {"type": "boolean"},
+          "output": {"type": "string"}
+        }
+      }
+    },
+    "branch_consistent": {"type": "boolean"},
+    "pr_consistent": {"type": "boolean"},
+    "working_tree_clean": {"type": "boolean"},
+    "ci_passed": {"type": ["boolean", "null"]},
+    "blocking_findings_remaining": {"type": "integer", "minimum": 0}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "needs_input"}}},
+      "then": {"properties": {"question": {"type": "string", "minLength": 1}}},
+      "else": {"properties": {"question": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"status": {"const": "completed"}}},
+      "then": {
+        "properties": {
+          "branch_consistent": {"const": true},
+          "pr_consistent": {"const": true},
+          "working_tree_clean": {"const": true},
+          "blocking_findings_remaining": {"const": 0}
+        }
+      }
+    }
+  ]
+}

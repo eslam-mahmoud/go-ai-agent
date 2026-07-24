@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "summary",
+    "question",
+    "discoveries",
+    "risks",
+    "recommended_next_action",
+    "changed_files",
+    "commit_sha",
+    "tests",
+    "pr_number"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["completed", "needs_input", "blocked", "failed"]
+    },
+    "summary": {"type": "string", "minLength": 1},
+    "question": {"type": ["string", "null"]},
+    "discoveries": {"type": "array", "items": {"type": "object"}},
+    "risks": {"type": "array", "items": {"type": "object"}},
+    "recommended_next_action": {"type": "string"},
+    "changed_files": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "commit_sha": {
+      "oneOf": [
+        {"type": "string", "pattern": "^[0-9a-f]{7,64}$"},
+        {"type": "null"}
+      ]
+    },
+    "tests": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "pr_number": {
+      "oneOf": [
+        {"type": "integer", "minimum": 1},
+        {"type": "null"}
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "needs_input"}}},
+      "then": {"properties": {"question": {"type": "string", "minLength": 1}}},
+      "else": {"properties": {"question": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"status": {"const": "completed"}}},
+      "then": {
+        "properties": {
+          "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{7,64}$"}
+        }
+      }
+    }
+  ]
+}

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -174,7 +173,7 @@ func (planner *Planner) Run(
 	if result == nil {
 		return nil, fmt.Errorf("%w: engine %q returned nil", ErrPlannerResult, planner.provider.Name())
 	}
-	result = clonePlannerEngineResult(result)
+	result = cloneEngineResult(result)
 	switch result.Status {
 	case engine.ResultCancelled:
 		return nil, engine.NewExecutionError(
@@ -202,12 +201,6 @@ func (planner *Planner) Run(
 		raw = json.RawMessage(strings.TrimSpace(result.OutputText))
 	}
 	return append(json.RawMessage(nil), raw...), nil
-}
-
-func clonePlannerEngineResult(result *engine.Result) *engine.Result {
-	cloned := *result
-	cloned.OutputJSON = append(json.RawMessage(nil), result.OutputJSON...)
-	return &cloned
 }
 
 type plannerPromptContext struct {
@@ -408,34 +401,6 @@ func validatePlannerContext(
 	return nil
 }
 
-func cloneStrings(values map[string]string) map[string]string {
-	if values == nil {
-		return nil
-	}
-	cloned := make(map[string]string, len(values))
-	for key, value := range values {
-		cloned[key] = value
-	}
-	return cloned
-}
-
-func isNilEngine(provider engine.Engine) bool {
-	return isNilPlannerDependency(provider)
-}
-
 func isNilPlannerContextProvider(contexts PlannerContextProvider) bool {
-	return isNilPlannerDependency(contexts)
-}
-
-func isNilPlannerDependency(value any) bool {
-	if value == nil {
-		return true
-	}
-	reflected := reflect.ValueOf(value)
-	switch reflected.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
-		return reflected.IsNil()
-	default:
-		return false
-	}
+	return isNilDependency(contexts)
 }

@@ -1,6 +1,7 @@
 package project
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,19 +31,65 @@ type ArchitectureAssessment struct {
 	Recorded         bool
 }
 
-// ArchitectureController raises the architecture-review obligation. It does not
-// run Architect mode; it decides when one is owed and blocks work until then.
+// ArchitectRunner is the provider-neutral boundary to Architect mode. It
+// returns output already validated against the architect output schema.
+type ArchitectRunner interface {
+	RunArchitect(
+		ctx context.Context,
+		projectID int64,
+		outstandingDiscoveryIDs []int64,
+	) (json.RawMessage, error)
+}
+
+// ArchitectureController raises the architecture-review obligation and, when
+// an Architect runner is configured, satisfies it. It never edits
+// architecture itself; the run proposes and later items apply.
 type ArchitectureController struct {
-	store ArchitectureStore
+	store     ArchitectureStore
+	architect ArchitectRunner
 }
 
 func NewArchitectureController(
 	architectureStore ArchitectureStore,
 ) (*ArchitectureController, error) {
+	return NewArchitectureControllerWithRunner(architectureStore, nil)
+}
+
+// NewArchitectureControllerWithRunner adds the Architect run. Without a runner
+// the controller still raises and reports the obligation.
+func NewArchitectureControllerWithRunner(
+	architectureStore ArchitectureStore,
+	architect ArchitectRunner,
+) (*ArchitectureController, error) {
 	if architectureStore == nil {
 		return nil, errors.New("architecture controller store is required")
 	}
-	return &ArchitectureController{store: architectureStore}, nil
+	return &ArchitectureController{store: architectureStore, architect: architect}, nil
+}
+
+// RunArchitect satisfies an outstanding obligation by running Architect mode
+// over the exact discoveries that raised it. It returns the assessment plus
+// the raw architecture proposal for later items to apply.
+func (controller *ArchitectureController) RunArchitect(
+	ctx context.Context,
+	projectID int64,
+) (*ArchitectureAssessment, json.RawMessage, error) {
+	assessment, err := controller.Assess(projectID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !assessment.Required || controller.architect == nil {
+		return assessment, nil, nil
+	}
+	ids := make([]int64, 0, len(assessment.Discoveries))
+	for _, discovery := range assessment.Discoveries {
+		ids = append(ids, discovery.ID)
+	}
+	proposal, err := controller.architect.RunArchitect(ctx, projectID, ids)
+	if err != nil {
+		return nil, nil, fmt.Errorf("run architect: %w", err)
+	}
+	return assessment, proposal, nil
 }
 
 // Assess reports the project's architecture-review obligation and records it

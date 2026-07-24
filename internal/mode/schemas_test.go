@@ -20,6 +20,7 @@ func TestBuiltinDefinitionsCompileAndDeclareFreshReviewer(t *testing.T) {
 		workflow.ModeFixer,
 		workflow.ModeVerifier,
 		workflow.ModeManager,
+		workflow.ModeArchitect,
 	}
 	if len(definitions) != len(want) {
 		t.Fatalf("definitions = %d, want %d", len(definitions), len(want))

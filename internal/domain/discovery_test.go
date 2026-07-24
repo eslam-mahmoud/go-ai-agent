@@ -183,3 +183,65 @@ func TestDiscoveryValidation(t *testing.T) {
 		t.Errorf("nil Validate error = %v", err)
 	}
 }
+
+func TestNormalizeDiscoveryTitleFoldsCosmeticDifferences(t *testing.T) {
+	same := []string{
+		"Retry budget is unbounded",
+		"  retry   budget is unbounded!  ",
+		"RETRY-BUDGET, IS UNBOUNDED.",
+		"Retry\tbudget\nis unbounded",
+	}
+	want := NormalizeDiscoveryTitle(same[0])
+	if want != "retry budget is unbounded" {
+		t.Fatalf("normalized = %q", want)
+	}
+	for _, title := range same[1:] {
+		if got := NormalizeDiscoveryTitle(title); got != want {
+			t.Errorf("NormalizeDiscoveryTitle(%q) = %q, want %q", title, got, want)
+		}
+	}
+	if NormalizeDiscoveryTitle("   ") != "" {
+		t.Error("blank title did not normalize to empty")
+	}
+	if NormalizeDiscoveryTitle("a b") == NormalizeDiscoveryTitle("ab") {
+		t.Error("distinct titles collapsed to the same form")
+	}
+}
+
+func TestDiscoveryContentHashIsStableAndDiscriminating(t *testing.T) {
+	base := NewDiscovery(7, 1, 1, "Retry budget is unbounded", DiscoveryBug, SeverityHigh)
+	hash := base.ContentHash()
+	if hash == "" || len(hash) != len("disc-")+16 {
+		t.Fatalf("hash = %q", hash)
+	}
+	if base.ContentHash() != hash {
+		t.Error("hash is not stable across calls")
+	}
+
+	// Cosmetic differences and non-identifying fields must not change identity.
+	cosmetic := NewDiscovery(9, 2, 2, "  RETRY budget, is unbounded!  ", DiscoveryBug, SeverityLow)
+	cosmetic.Description = "totally different description"
+	cosmetic.BlocksCurrent = true
+	if cosmetic.ContentHash() != hash {
+		t.Errorf("cosmetic variant hash = %q, want %q", cosmetic.ContentHash(), hash)
+	}
+
+	// Category and title are identifying.
+	other := NewDiscovery(7, 1, 1, "Retry budget is unbounded", DiscoveryTesting, SeverityHigh)
+	if other.ContentHash() == hash {
+		t.Error("different category produced the same hash")
+	}
+	renamed := NewDiscovery(7, 1, 1, "Retry budget is missing", DiscoveryBug, SeverityHigh)
+	if renamed.ContentHash() == hash {
+		t.Error("different title produced the same hash")
+	}
+	if (*Discovery)(nil).ContentHash() != "" {
+		t.Error("nil discovery produced a hash")
+	}
+}
+
+func TestDiscoveryFingerprintCombinesCategoryAndTitle(t *testing.T) {
+	if got := DiscoveryFingerprint(DiscoveryBug, " Broken  Thing "); got != "bug|broken thing" {
+		t.Errorf("DiscoveryFingerprint = %q", got)
+	}
+}

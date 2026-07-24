@@ -87,6 +87,11 @@ func ExtractDiscoveries(
 		discovery.BlocksCurrent = output.BlocksCurrent
 		discovery.ArchitectureRisk = output.ArchitectureRisk
 		discovery.ExternalID = strings.TrimSpace(output.ExternalID)
+		if discovery.ExternalID == "" {
+			// Derive the stable identity so independent executions reporting
+			// the same finding converge on one discovery.
+			discovery.ExternalID = discovery.ContentHash()
+		}
 		discovery.SuggestedAction = strings.TrimSpace(output.SuggestedAction)
 		if discovery.SuggestedAction == "" {
 			// Pre-classify deterministically so the manager always receives a

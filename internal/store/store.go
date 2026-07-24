@@ -694,6 +694,17 @@ var migrations = []struct {
 			) THEN RAISE(ABORT, 'discovery execution must belong to project') END;
 		END;
 	`},
+	// v14: stable content-derived discovery identity. The unique index makes
+	// deduplication a database guarantee, not only a code path.
+	{14, `
+		ALTER TABLE discoveries ADD COLUMN occurrences INTEGER NOT NULL DEFAULT 1
+			CHECK (occurrences >= 1);
+		ALTER TABLE discoveries ADD COLUMN linked_task_id INTEGER
+			REFERENCES project_tasks(id) ON DELETE SET NULL;
+		CREATE UNIQUE INDEX idx_discoveries_external_id
+			ON discoveries(project_id, external_id)
+			WHERE external_id <> '';
+	`},
 }
 
 func (s *Store) migrate() error {

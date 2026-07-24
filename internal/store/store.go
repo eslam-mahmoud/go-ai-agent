@@ -546,6 +546,20 @@ var migrations = []struct {
 			) THEN RAISE(ABORT, 'next task must belong to review project') END;
 		END;
 	`},
+	// v8: record idempotent legacy-to-project conversions while preserving the
+	// legacy task rows for backward-compatible daemon operation.
+	{8, `
+		CREATE TABLE legacy_project_migrations (
+			legacy_task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+			project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			project_task_id INTEGER NOT NULL REFERENCES project_tasks(id) ON DELETE CASCADE,
+			execution_id INTEGER REFERENCES executions(id) ON DELETE SET NULL,
+			migrated_at DATETIME NOT NULL,
+			UNIQUE(project_task_id)
+		);
+		CREATE INDEX idx_legacy_project_migrations_project
+			ON legacy_project_migrations(project_id, legacy_task_id);
+	`},
 }
 
 func (s *Store) migrate() error {

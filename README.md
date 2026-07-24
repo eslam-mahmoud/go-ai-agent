@@ -524,6 +524,22 @@ updates the linked issue otherwise. Madar owns only the content between the
 hidden `madar:project-dashboard` markers; text outside those markers is
 preserved exactly.
 
+### Migrating legacy issue mode
+
+The legacy task table remains intact during the v2 transition. Convert one
+repository into a v2 project with:
+
+```bash
+madar migrate-project --repo owner/repository
+```
+
+Optional `--name`, `--goal`, `--scope`, `--release-target`, and
+`--parent-issue` flags override the migration defaults. The conversion copies
+legacy issue, PR, branch, provider-session, and state history in one
+transaction. Repeating the command is safe and reports already-mapped rows.
+The legacy records remain readable and the existing daemon workflow continues
+to operate during the compatibility period.
+
 ---
 
 ## Project Structure

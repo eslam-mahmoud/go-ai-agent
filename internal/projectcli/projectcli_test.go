@@ -454,6 +454,112 @@ func TestSyncIssueRequiresGitHubToken(t *testing.T) {
 	}
 }
 
+func TestRunMigrationUsesDefaultsPreservesLegacyAndIsIdempotent(t *testing.T) {
+	configPath, dbPath := writeTestConfig(t)
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := s.BindTaskExecution(
+		"owner/repo",
+		42,
+		store.StateInProgress,
+		store.ExecutionBinding{
+			Engine:            "claude",
+			Model:             "sonnet-test",
+			ProviderSessionID: "legacy-session",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("PATH", "")
+
+	args := []string{
+		"--repo", "owner/repo",
+		"--config", configPath,
+		"--env", "",
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := RunMigration(args, &stdout, &stderr); err != nil {
+		t.Fatalf("migration: %v\nstderr: %s", err, stderr.String())
+	}
+	for _, want := range []string{
+		"migrated legacy repository owner/repo to project 1",
+		"project created      : true",
+		"legacy tasks         : 1",
+		"newly mapped         : 1",
+		"legacy rows preserved: true",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("migration output missing %q:\n%s", want, stdout.String())
+		}
+	}
+
+	reopened, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := reopened.GetProjectByRepo("owner/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project == nil ||
+		project.Name != "repo" ||
+		project.Goal != "Continue owner/repo under Madar v2." ||
+		project.Scope != "Migrated from legacy issue mode." {
+		t.Fatalf("default migrated project = %#v", project)
+	}
+	storedLegacy, err := reopened.GetTask("owner/repo", 42)
+	if err != nil ||
+		storedLegacy == nil ||
+		storedLegacy.ID != legacy.ID ||
+		storedLegacy.SessionID != "legacy-session" {
+		t.Fatalf("legacy row = %#v, error=%v", storedLegacy, err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := RunMigration(args, &stdout, &stderr); err != nil {
+		t.Fatalf("repeat migration: %v\nstderr: %s", err, stderr.String())
+	}
+	for _, want := range []string{
+		"project created      : false",
+		"newly mapped         : 0",
+		"already mapped       : 1",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("repeat output missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestRunMigrationErrors(t *testing.T) {
+	configPath, _ := writeTestConfig(t)
+	if err := RunMigration(
+		[]string{"--config", configPath, "--env", ""},
+		&bytes.Buffer{},
+		&bytes.Buffer{},
+	); !errors.Is(err, ErrUsage) {
+		t.Fatalf("missing repo error = %v", err)
+	}
+	if err := RunMigration(
+		[]string{"--repo", "owner/repo", "--config", configPath, "--env", ""},
+		&bytes.Buffer{},
+		&bytes.Buffer{},
+	); !errors.Is(err, store.ErrNoLegacyTasks) {
+		t.Fatalf("missing legacy tasks error = %v", err)
+	}
+}
+
 func TestProjectHelp(t *testing.T) {
 	var stdout bytes.Buffer
 	if err := Run([]string{"help"}, &stdout, &bytes.Buffer{}); err != nil {

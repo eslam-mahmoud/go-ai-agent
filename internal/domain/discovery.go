@@ -81,7 +81,9 @@ type Discovery struct {
 	CreatedIssueNumber int
 	BacklogPosition    int
 	// Occurrences counts how many executions reported this same finding.
-	Occurrences  int
+	Occurrences int
+	// Decision records the manager's exact verdict; Status is derived from it.
+	Decision     DiscoveryDecision
 	LinkedTaskID *int64
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
@@ -221,6 +223,8 @@ func (discovery *Discovery) Validate() error {
 		return fmt.Errorf("%w: occurrences must be at least one", ErrInvalidDiscovery)
 	case discovery.LinkedTaskID != nil && *discovery.LinkedTaskID <= 0:
 		return fmt.Errorf("%w: linked task ID must be positive", ErrInvalidDiscovery)
+	case discovery.Decision != "" && !discovery.Decision.Valid():
+		return fmt.Errorf("%w: unknown decision %q", ErrInvalidDiscovery, discovery.Decision)
 	case strings.TrimSpace(discovery.ExternalID) != discovery.ExternalID:
 		return fmt.Errorf(
 			"%w: external ID cannot have surrounding whitespace",
@@ -268,4 +272,61 @@ func (discovery *Discovery) ContentHash() string {
 	}
 	sum := sha256.Sum256([]byte(DiscoveryFingerprint(discovery.Category, discovery.Title)))
 	return "disc-" + hex.EncodeToString(sum[:])[:16]
+}
+
+// DiscoveryDecision is one Engineering Manager verdict on a discovery. The
+// vocabulary is the plan's; the derived status is what the rest of Madar
+// reasons about, while the verdict itself records intent.
+type DiscoveryDecision string
+
+const (
+	DecisionFixInCurrentTask     DiscoveryDecision = "fix-in-current-task"
+	DecisionCreateNextTask       DiscoveryDecision = "create-next-task"
+	DecisionCreatePrioritized    DiscoveryDecision = "create-prioritized-task"
+	DecisionCreateReleaseBlocker DiscoveryDecision = "create-release-blocker"
+	DecisionAddToBacklog         DiscoveryDecision = "add-to-backlog"
+	DecisionDefer                DiscoveryDecision = "defer"
+	DecisionMergeIntoExisting    DiscoveryDecision = "merge-into-existing-task"
+	DecisionRejectOutOfScope     DiscoveryDecision = "reject-out-of-scope"
+	DecisionRequestArchitecture  DiscoveryDecision = "request-architecture-review"
+	DecisionRequestHuman         DiscoveryDecision = "request-human-decision"
+)
+
+func (decision DiscoveryDecision) Valid() bool {
+	_, ok := discoveryDecisionStatuses[decision]
+	return ok
+}
+
+// Status maps a verdict to the discovery status it produces. Decisions that
+// hand the discovery to another actor defer it rather than accepting it.
+func (decision DiscoveryDecision) Status() (DiscoveryStatus, bool) {
+	status, ok := discoveryDecisionStatuses[decision]
+	return status, ok
+}
+
+// CreatesTask reports whether a decision means new backlog work, which items
+// 42 and 43 turn into a GitHub issue and a backlog entry.
+func (decision DiscoveryDecision) CreatesTask() bool {
+	switch decision {
+	case DecisionCreateNextTask,
+		DecisionCreatePrioritized,
+		DecisionCreateReleaseBlocker,
+		DecisionAddToBacklog:
+		return true
+	default:
+		return false
+	}
+}
+
+var discoveryDecisionStatuses = map[DiscoveryDecision]DiscoveryStatus{
+	DecisionFixInCurrentTask:     DiscoveryAccepted,
+	DecisionCreateNextTask:       DiscoveryAccepted,
+	DecisionCreatePrioritized:    DiscoveryAccepted,
+	DecisionCreateReleaseBlocker: DiscoveryAccepted,
+	DecisionAddToBacklog:         DiscoveryAccepted,
+	DecisionMergeIntoExisting:    DiscoveryMerged,
+	DecisionDefer:                DiscoveryDeferred,
+	DecisionRequestArchitecture:  DiscoveryDeferred,
+	DecisionRequestHuman:         DiscoveryDeferred,
+	DecisionRejectOutOfScope:     DiscoveryRejected,
 }

@@ -705,6 +705,19 @@ var migrations = []struct {
 			ON discoveries(project_id, external_id)
 			WHERE external_id <> '';
 	`},
+	// v15: the manager's exact verdict, kept alongside the derived status so
+	// intent survives the mapping to a coarse status.
+	{15, `
+		ALTER TABLE discoveries ADD COLUMN decision TEXT NOT NULL DEFAULT '' CHECK (
+			decision IN (
+				'', 'fix-in-current-task', 'create-next-task',
+				'create-prioritized-task', 'create-release-blocker',
+				'add-to-backlog', 'defer', 'merge-into-existing-task',
+				'reject-out-of-scope', 'request-architecture-review',
+				'request-human-decision'
+			)
+		);
+	`},
 }
 
 func (s *Store) migrate() error {

@@ -197,9 +197,9 @@ func insertDiscovery(
 			project_id, source_task_id, source_execution_id, external_id,
 			title, description, category, severity, blocks_current,
 			architecture_risk, suggested_action, status, decision_reason,
-			created_issue_number, backlog_position, occurrences, linked_task_id,
-			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			created_issue_number, backlog_position, occurrences, decision,
+			linked_task_id, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		discovery.ProjectID,
 		nullablePositive(discovery.SourceTaskID),
@@ -217,6 +217,7 @@ func insertDiscovery(
 		discovery.CreatedIssueNumber,
 		discovery.BacklogPosition,
 		maxInt(discovery.Occurrences, 1),
+		string(discovery.Decision),
 		nullableInt64(discovery.LinkedTaskID),
 		now,
 		now,
@@ -410,8 +411,8 @@ const discoverySelect = `
 		id, project_id, source_task_id, source_execution_id, external_id,
 		title, description, category, severity, blocks_current,
 		architecture_risk, suggested_action, status, decision_reason,
-		created_issue_number, backlog_position, occurrences, linked_task_id,
-		created_at, updated_at
+		created_issue_number, backlog_position, occurrences, decision,
+		linked_task_id, created_at, updated_at
 	FROM discoveries
 `
 
@@ -421,6 +422,7 @@ func scanDiscovery(row scanner) (*domain.Discovery, error) {
 		sourceTaskID, sourceExecID   sql.NullInt64
 		linkedTaskID                 sql.NullInt64
 		category, severity, status   string
+		decision                     string
 		blocksCurrent, architectural int
 	)
 	if err := row.Scan(
@@ -441,6 +443,7 @@ func scanDiscovery(row scanner) (*domain.Discovery, error) {
 		&discovery.CreatedIssueNumber,
 		&discovery.BacklogPosition,
 		&discovery.Occurrences,
+		&decision,
 		&linkedTaskID,
 		&discovery.CreatedAt,
 		&discovery.UpdatedAt,
@@ -456,6 +459,7 @@ func scanDiscovery(row scanner) (*domain.Discovery, error) {
 	discovery.Category = domain.DiscoveryCategory(category)
 	discovery.Severity = domain.DiscoverySeverity(severity)
 	discovery.Status = domain.DiscoveryStatus(status)
+	discovery.Decision = domain.DiscoveryDecision(decision)
 	discovery.BlocksCurrent = blocksCurrent != 0
 	discovery.ArchitectureRisk = architectural != 0
 	discovery.CreatedAt = discovery.CreatedAt.UTC()

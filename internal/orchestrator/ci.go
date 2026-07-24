@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/eslam-mahmoud/go-ai-agent/internal/claude"
+	"github.com/eslam-mahmoud/go-ai-agent/internal/engine"
 	githubclient "github.com/eslam-mahmoud/go-ai-agent/internal/github"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/store"
 )
@@ -15,7 +15,7 @@ import (
 // checkCIPending inspects all tasks in ci_state=waiting and advances them:
 //   - still pending → skip
 //   - passed        → finalize (label done, Telegram)
-//   - failed        → re-invoke Claude with failure output (up to MaxRetries)
+//   - failed        → re-invoke the configured engine with failure output (up to MaxRetries)
 //   - retries exhausted → transition to awaiting-feedback
 func (l *Loop) checkCIPending(ctx context.Context) error {
 	if !l.cfg.CI.Enabled {
@@ -155,45 +155,53 @@ func (l *Loop) handleCIFailure(ctx context.Context, owner, repo string, task *st
 	}
 
 	commentBody := fmt.Sprintf(
-		"⚠️ **CI failed (attempt %d/%d).** Re-running Claude to fix it...\n\n<details><summary>Failure output</summary>\n\n```\n%s\n```\n</details>",
+		"⚠️ **CI failed (attempt %d/%d).** Re-running the agent to fix it...\n\n<details><summary>Failure output</summary>\n\n```\n%s\n```\n</details>",
 		retries, l.cfg.CI.MaxRetries, truncate(failureOutput, 2000),
 	)
 	if _, err := l.gh.PostComment(ctx, owner, repo, task.IssueNumber, commentBody); err != nil {
 		l.log.Warn("post CI-retry comment failed", "err", err)
 	}
 
-	// Resume the Claude session with the failure details.
-	prompt := claude.BuildCIFixPrompt(failureOutput, branch, task.PRNumber, retries, l.cfg.CI.MaxRetries)
+	// Resume the provider session with the failure details.
+	prompt := BuildCIFixPrompt(failureOutput, branch, task.PRNumber, retries, l.cfg.CI.MaxRetries)
 	workDir := filepath.Join(l.cfg.WorkspaceDir, owner, repo)
-	opts := claude.RunOptions{
+	request := engine.RunRequest{
 		WorkDir:         workDir,
-		ResumeID:        task.SessionID,
+		ResumeSessionID: task.SessionID,
 		Prompt:          prompt,
 		MaxTurns:        l.cfg.Claude.MaxTurns,
 		Timeout:         l.cfg.Claude.RunTimeout,
-		SkipPermissions: l.cfg.Claude.SkipPermissions,
+		Policy: engine.Policy{
+			SkipPermissions: l.cfg.Claude.SkipPermissions,
+		},
 	}
 
-	result, err := l.claude.Run(ctx, opts)
+	result, err := l.engine.Resume(ctx, request, nil)
 	if err != nil {
-		return fmt.Errorf("claude CI fix run: %w", err)
+		return fmt.Errorf("provider CI fix run: %w", err)
+	}
+	if result == nil {
+		return fmt.Errorf("provider CI fix returned no result")
 	}
 
-	if result.NeedsInput {
+	if needsInput, question := detectClarification(result.OutputText); needsInput {
 		issue, _ := l.gh.GetIssue(ctx, owner, repo, task.IssueNumber)
 		if issue == nil {
 			issue = &githubclient.Issue{Number: task.IssueNumber}
 		}
-		// Claude gave up — escalate to human.
+		// The provider gave up — escalate to human.
 		_ = l.store.SetCIState(task.Repo, task.IssueNumber, store.CIStateGaveUp)
-		return l.handleClarification(ctx, owner, repo, task.Repo, task.IssueNumber, issue, result.Question)
+		return l.handleClarification(ctx, owner, repo, task.Repo, task.IssueNumber, issue, question)
 	}
 
-	if result.IsError {
-		return fmt.Errorf("claude CI fix returned error: %s", result.Output)
+	if result.Status == engine.ResultFailed {
+		return fmt.Errorf("provider CI fix returned error: %s", result.OutputText)
+	}
+	if result.Status != engine.ResultCompleted {
+		return fmt.Errorf("provider CI fix returned invalid status %q", result.Status)
 	}
 
-	// Claude pushed a fix — reset ci_state to waiting for the new run to complete.
+	// The provider pushed a fix — reset ci_state to waiting for the new run to complete.
 	return l.store.SetCIState(task.Repo, task.IssueNumber, store.CIStateWaiting)
 }
 
@@ -217,7 +225,7 @@ func (l *Loop) giveCIUpToHuman(ctx context.Context, owner, repo string, task *st
 }
 
 // StartCIWatch transitions a completed task into CI-waiting mode.
-// Call this after Claude finishes and pushes a branch, before finalizing the issue.
+// Call this after the agent finishes and pushes a branch, before finalizing the issue.
 func (l *Loop) StartCIWatch(ctx context.Context, fullRepo string, issueNumber int, prNumber int) error {
 	if err := l.store.SetPRNumber(fullRepo, issueNumber, prNumber); err != nil {
 		return err
@@ -243,7 +251,7 @@ func truncate(s string, max int) string {
 	return s[:max] + "\n[truncated]"
 }
 
-// extractPRNumber looks for a PR number anywhere in the Claude output.
+// extractPRNumber looks for a PR number anywhere in the provider output.
 // Scans for patterns like "PR: #42" or "PR #7".
 func extractPRNumber(output string) int {
 	// Walk through the string looking for "PR" followed by optional ": " or " " then "#<digits>".

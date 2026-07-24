@@ -126,7 +126,7 @@ Claude is instructed to create a branch named exactly `madar/issue-<N>` and incl
 
 | Component | File | Responsibility |
 |---|---|---|
-| **Orchestrator** | `internal/orchestrator/loop.go` | Poll loop, task state machine, concurrency guard |
+| **Orchestrator** | `internal/orchestrator/loop.go` | Provider-neutral task execution, state transitions, and CI feedback |
 | **Engine Kernel** | `internal/engine/` | Provider-neutral contracts, deterministic provider registry, and error taxonomy |
 | **Claude Adapter** | `internal/engine/claude/adapter.go` | Spawn `claude`, parse `stream-json`, and normalize provider behavior |
 | **Legacy Claude Facade** | `internal/claude/runner.go` | Preserve the v1 runner API and clarification behavior through the adapter |

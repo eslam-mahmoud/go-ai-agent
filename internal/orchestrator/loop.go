@@ -12,8 +12,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/eslam-mahmoud/go-ai-agent/internal/claude"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/config"
+	"github.com/eslam-mahmoud/go-ai-agent/internal/engine"
 	githubclient "github.com/eslam-mahmoud/go-ai-agent/internal/github"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/store"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/telegram"
@@ -23,7 +23,7 @@ import (
 type Loop struct {
 	cfg                 *config.Config
 	gh                  githubclient.Client
-	claude              claude.Runner
+	engine              engine.Engine
 	telegram            telegram.Gateway
 	store               *store.Store
 	log                 *slog.Logger
@@ -42,7 +42,7 @@ func (l *Loop) SetCurrentVersion(v string) { l.currentVersion = v }
 func New(
 	cfg *config.Config,
 	gh githubclient.Client,
-	runner claude.Runner,
+	provider engine.Engine,
 	tg telegram.Gateway,
 	s *store.Store,
 	log *slog.Logger,
@@ -50,7 +50,7 @@ func New(
 	return &Loop{
 		cfg:      cfg,
 		gh:       gh,
-		claude:   runner,
+		engine:   provider,
 		telegram: tg,
 		store:    s,
 		log:      log,
@@ -230,7 +230,7 @@ func (l *Loop) recoverInterrupted(ctx context.Context) error {
 			"issue", task.IssueNumber,
 			"session", task.SessionID,
 		)
-		if err := l.runClaude(
+		if err := l.runEngine(
 			ctx,
 			owner,
 			repo,
@@ -260,7 +260,7 @@ func (l *Loop) resumeIfReplied(ctx context.Context, owner, repo string, task *st
 
 	// Collect ALL human comments posted after our clarification — not just the first.
 	// Humans often send corrections or additions in follow-up comments.
-	var replies []claude.ReplyEntry
+	var replies []ReplyEntry
 	for _, c := range comments {
 		if c.Author == "" {
 			continue
@@ -272,7 +272,7 @@ func (l *Loop) resumeIfReplied(ctx context.Context, owner, repo string, task *st
 		if isAgentComment(c.Body) {
 			continue
 		}
-		replies = append(replies, claude.ReplyEntry{
+		replies = append(replies, ReplyEntry{
 			Author:    c.Author,
 			Body:      c.Body,
 			Timestamp: c.CreatedAt.Format(time.RFC3339),
@@ -300,9 +300,9 @@ func (l *Loop) resumeIfReplied(ctx context.Context, owner, repo string, task *st
 		return err
 	}
 
-	// Resume Claude session with all human replies, tagged with author and timestamp.
-	prompt := claude.BuildResumePrompt(replies)
-	return l.runClaude(ctx, owner, repo, task.IssueNumber, issue, task.SessionID, prompt, true)
+	// Resume the provider session with all human replies, tagged with author and timestamp.
+	prompt := BuildResumePrompt(replies)
+	return l.runEngine(ctx, owner, repo, task.IssueNumber, issue, task.SessionID, prompt, true)
 }
 
 func (l *Loop) pickAndRun(ctx context.Context) error {
@@ -347,20 +347,20 @@ func (l *Loop) pickAndRun(ctx context.Context) error {
 			l.log.Error("transition labels", "err", err)
 		}
 
-		// Pull latest changes so Claude works against current main.
+		// Pull latest changes so the agent works against current main.
 		l.pullWorkspace(ctx, owner, repo)
 
 		// Build first-run prompt from issue + thread (human comments only).
 		comments, _ := l.gh.GetComments(ctx, owner, repo, issue.Number, nil)
 		threadStr := l.formatHumanThread(comments)
-		prompt := claude.BuildFirstRunPrompt(issue.Title, issue.Body, threadStr, issue.Number, l.cfg.Claude.MaxIssueBodyChars)
+		prompt := BuildFirstRunPrompt(issue.Title, issue.Body, threadStr, issue.Number, l.cfg.Claude.MaxIssueBodyChars)
 
-		return l.runClaude(ctx, owner, repo, issue.Number, issue, sessionID, prompt, false)
+		return l.runEngine(ctx, owner, repo, issue.Number, issue, sessionID, prompt, false)
 	}
 	return nil
 }
 
-func (l *Loop) runClaude(ctx context.Context, owner, repo string, issueNumber int, issue *githubclient.Issue, sessionID, prompt string, isResume bool) error {
+func (l *Loop) runEngine(ctx context.Context, owner, repo string, issueNumber int, issue *githubclient.Issue, sessionID, prompt string, isResume bool) error {
 	workDir := filepath.Join(l.cfg.WorkspaceDir, owner, repo)
 
 	if _, err := os.Stat(workDir); err != nil {
@@ -371,25 +371,33 @@ func (l *Loop) runClaude(ctx context.Context, owner, repo string, issueNumber in
 			fmt.Sprintf("Workspace directory is missing: `%s`\n\nPlease ensure the repo is cloned under `workspace_dir` and retry.", workDir))
 	}
 
-	opts := claude.RunOptions{
-		WorkDir:         workDir,
-		Prompt:          prompt,
-		MaxTurns:        l.cfg.Claude.MaxTurns,
-		Timeout:         l.cfg.Claude.RunTimeout,
-		SkipPermissions: l.cfg.Claude.SkipPermissions,
+	request := engine.RunRequest{
+		WorkDir:  workDir,
+		Prompt:   prompt,
+		MaxTurns: l.cfg.Claude.MaxTurns,
+		Timeout:  l.cfg.Claude.RunTimeout,
+		Policy: engine.Policy{
+			SkipPermissions: l.cfg.Claude.SkipPermissions,
+		},
 	}
 	if isResume {
-		opts.ResumeID = sessionID
+		request.ResumeSessionID = sessionID
 	} else {
-		opts.SessionID = sessionID
+		request.SessionID = sessionID
 	}
 
 	fullRepo := owner + "/" + repo
-	l.log.Info("running claude", "repo", fullRepo, "issue", issueNumber, "session", sessionID, "resume", isResume)
+	l.log.Info("running engine", "engine", l.engine.Name(), "repo", fullRepo, "issue", issueNumber, "session", sessionID, "resume", isResume)
 
-	result, err := l.claude.Run(ctx, opts)
+	var result *engine.Result
+	var err error
+	if isResume {
+		result, err = l.engine.Resume(ctx, request, nil)
+	} else {
+		result, err = l.engine.Run(ctx, request, nil)
+	}
 	if err != nil {
-		l.log.Error("claude run failed", "err", err)
+		l.log.Error("engine run failed", "engine", l.engine.Name(), "err", err)
 
 		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 			if _, stateErr := l.store.UpsertTask(
@@ -417,8 +425,15 @@ func (l *Loop) runClaude(ctx context.Context, owner, repo string, issueNumber in
 		_ = l.store.Log(fullRepo, issueNumber, "error", err.Error())
 		_ = l.telegram.NotifyError(ctx, issue.HTMLURL, err)
 		// Transition to awaiting-feedback so the task doesn't stay in-progress.
-		question := fmt.Sprintf("Claude process failed: %v\n\nPlease advise how to proceed.", err)
+		question := fmt.Sprintf("Provider execution failed: %v\n\nPlease advise how to proceed.", err)
 		return l.handleClarification(ctx, owner, repo, fullRepo, issueNumber, issue, question)
+	}
+	if result == nil {
+		invalid := errors.New("provider returned no result")
+		_ = l.store.Log(fullRepo, issueNumber, "error", invalid.Error())
+		_ = l.telegram.NotifyError(ctx, issue.HTMLURL, invalid)
+		return l.handleClarification(ctx, owner, repo, fullRepo, issueNumber, issue,
+			"Provider returned no result. Please advise how to proceed.")
 	}
 
 	// Capture session ID from stream if available (first run).
@@ -427,24 +442,38 @@ func (l *Loop) runClaude(ctx context.Context, owner, repo string, issueNumber in
 		sessionID = result.SessionID
 	}
 
-	if result.NeedsInput {
-		return l.handleClarification(ctx, owner, repo, fullRepo, issueNumber, issue, result.Question)
+	if result.Status == engine.ResultCancelled {
+		if _, stateErr := l.store.UpsertTask(fullRepo, issueNumber, store.StateInterrupted, ""); stateErr != nil {
+			return fmt.Errorf("mark cancelled task interrupted: %w", stateErr)
+		}
+		_ = l.store.Log(fullRepo, issueNumber, "interrupted", "provider returned cancelled status")
+		return nil
 	}
 
-	if result.IsError {
-		errMsg := fmt.Errorf("claude reported an error: %s", result.Output)
-		_ = l.store.Log(fullRepo, issueNumber, "error", result.Output)
+	if needsInput, question := detectClarification(result.OutputText); needsInput {
+		return l.handleClarification(ctx, owner, repo, fullRepo, issueNumber, issue, question)
+	}
+
+	switch result.Status {
+	case engine.ResultFailed:
+		errMsg := fmt.Errorf("provider reported an error: %s", result.OutputText)
+		_ = l.store.Log(fullRepo, issueNumber, "error", result.OutputText)
 		_ = l.telegram.NotifyError(ctx, issue.HTMLURL, errMsg)
-		// Same: don't leave the task in-progress — ask the human.
 		return l.handleClarification(ctx, owner, repo, fullRepo, issueNumber, issue,
-			fmt.Sprintf("Claude reported an error:\n\n%s\n\nPlease advise how to proceed.", result.Output))
+			fmt.Sprintf("Provider reported an error:\n\n%s\n\nPlease advise how to proceed.", result.OutputText))
+	case engine.ResultCompleted:
+		return l.handleCompletion(ctx, owner, repo, fullRepo, issueNumber, issue, result.OutputText)
+	default:
+		invalid := fmt.Errorf("provider returned invalid result status %q", result.Status)
+		_ = l.store.Log(fullRepo, issueNumber, "error", invalid.Error())
+		_ = l.telegram.NotifyError(ctx, issue.HTMLURL, invalid)
+		return l.handleClarification(ctx, owner, repo, fullRepo, issueNumber, issue,
+			fmt.Sprintf("%v. Please advise how to proceed.", invalid))
 	}
-
-	return l.handleCompletion(ctx, owner, repo, fullRepo, issueNumber, issue, result.Output)
 }
 
 func (l *Loop) handleClarification(ctx context.Context, owner, repo, fullRepo string, issueNumber int, issue *githubclient.Issue, question string) error {
-	l.log.Info("claude needs clarification", "repo", fullRepo, "issue", issueNumber)
+	l.log.Info("agent needs clarification", "repo", fullRepo, "issue", issueNumber)
 
 	commentBody := fmt.Sprintf("🤔 **Madar needs your input before continuing:**\n\n%s", question)
 	comment, err := l.gh.PostComment(ctx, owner, repo, issueNumber, commentBody)
@@ -476,7 +505,7 @@ func (l *Loop) handleClarification(ctx context.Context, owner, repo, fullRepo st
 func (l *Loop) handleCompletion(ctx context.Context, owner, repo, fullRepo string, issueNumber int, issue *githubclient.Issue, output string) error {
 	l.log.Info("task completed", "repo", fullRepo, "issue", issueNumber)
 
-	// If CI is enabled and Claude opened a PR, hand off to CI watching instead of finalizing now.
+	// If CI is enabled and the agent opened a PR, hand off to CI watching instead of finalizing now.
 	if l.cfg.CI.Enabled {
 		if prNumber := extractPRNumber(output); prNumber > 0 {
 			l.log.Info("PR detected, starting CI watch", "repo", fullRepo, "issue", issueNumber, "pr", prNumber)
@@ -537,7 +566,7 @@ func (l *Loop) getIssueLabels(ctx context.Context, owner, repo string, issueNumb
 	return issue.Labels, nil
 }
 
-// formatHumanThread formats only human comments for inclusion in Claude's prompt.
+// formatHumanThread formats only human comments for inclusion in the agent prompt.
 // Bot comments are excluded. If the total exceeds MaxThreadChars, the oldest
 // comments are dropped (most recent are most relevant to the current task).
 func (l *Loop) formatHumanThread(comments []*githubclient.Comment) string {

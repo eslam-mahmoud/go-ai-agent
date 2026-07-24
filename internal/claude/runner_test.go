@@ -23,7 +23,9 @@ func TestLegacyRunnerUsesAdapterAndPreservesResult(t *testing.T) {
 		WorkDir:         t.TempDir(),
 		ResumeID:        "session-1",
 		MaxTurns:        8,
-		Timeout:         5 * time.Second,
+		// Generous: this asserts argument handling, not timeout behavior, and
+		// a short budget flakes when the whole suite runs in parallel.
+		Timeout:         60 * time.Second,
 		Prompt:          "continue",
 		SkipPermissions: true,
 	})

@@ -15,19 +15,106 @@ var (
 	ErrDiscoveryOwnership = errors.New("discovery ownership conflict")
 )
 
-// CreateDiscoveries persists a batch atomically and records how many an
-// execution produced. An empty batch is a no-op with no audit noise.
+// DiscoveryBatch separates newly recorded findings from repeat sightings of
+// findings the project already knows about.
+type DiscoveryBatch struct {
+	Created    []*domain.Discovery
+	Duplicates []*domain.Discovery
+}
+
+// CreateDiscoveries persists a batch atomically, collapsing repeat sightings
+// onto the discovery that already represents them. An empty batch is a no-op.
 func (s *Store) CreateDiscoveries(
 	projectID int64,
 	discoveries []*domain.Discovery,
 	idempotencyKey string,
-) ([]*domain.Discovery, error) {
+) (*DiscoveryBatch, error) {
 	if projectID <= 0 {
 		return nil, fmt.Errorf("%w: project ID must be positive", domain.ErrInvalidDiscovery)
 	}
 	if len(discoveries) == 0 {
 		return nil, nil
 	}
+	prepared, err := prepareDiscoveryBatch(projectID, discoveries)
+	if err != nil {
+		return nil, err
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin create discoveries: %w", err)
+	}
+	defer tx.Rollback()
+	if err := requireProject(tx, projectID); err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	createdIDs := make([]int64, 0, len(prepared))
+	duplicateIDs := make([]int64, 0)
+	for index, discovery := range prepared {
+		existingID, err := findDiscoveryByExternalID(tx, projectID, discovery.ExternalID)
+		if err != nil {
+			return nil, err
+		}
+		if existingID > 0 {
+			if err := recordDiscoverySighting(tx, existingID, discovery, now); err != nil {
+				return nil, err
+			}
+			duplicateIDs = append(duplicateIDs, existingID)
+			continue
+		}
+		if discovery.LinkedTaskID == nil {
+			linked, err := findBacklogTaskByTitle(tx, projectID, discovery.Title)
+			if err != nil {
+				return nil, err
+			}
+			discovery.LinkedTaskID = linked
+		}
+		id, err := insertDiscovery(tx, discovery, now)
+		if err != nil {
+			return nil, fmt.Errorf("insert discovery %d: %w", index, err)
+		}
+		createdIDs = append(createdIDs, id)
+	}
+	if err := touchProject(tx, projectID, now); err != nil {
+		return nil, err
+	}
+	if err := appendDiscoveryBatchFact(
+		tx, projectID, prepared[0], createdIDs, duplicateIDs, idempotencyKey,
+	); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit create discoveries: %w", err)
+	}
+
+	batch := &DiscoveryBatch{}
+	for _, id := range createdIDs {
+		discovery, err := s.GetDiscoveryByID(id)
+		if err != nil {
+			return nil, err
+		}
+		batch.Created = append(batch.Created, discovery)
+	}
+	for _, id := range duplicateIDs {
+		discovery, err := s.GetDiscoveryByID(id)
+		if err != nil {
+			return nil, err
+		}
+		batch.Duplicates = append(batch.Duplicates, discovery)
+	}
+	return batch, nil
+}
+
+// prepareDiscoveryBatch validates every member up front and collapses repeats
+// inside the batch itself, so one execution reporting a finding twice records
+// it once.
+func prepareDiscoveryBatch(
+	projectID int64,
+	discoveries []*domain.Discovery,
+) ([]*domain.Discovery, error) {
+	prepared := make([]*domain.Discovery, 0, len(discoveries))
+	seen := make(map[string]*domain.Discovery, len(discoveries))
 	for index, discovery := range discoveries {
 		if err := discovery.Validate(); err != nil {
 			return nil, fmt.Errorf("create discovery %d: %w", index, err)
@@ -48,62 +135,147 @@ func (s *Store) CreateDiscoveries(
 				projectID,
 			)
 		}
+		if strings.TrimSpace(discovery.ExternalID) == "" {
+			discovery.ExternalID = discovery.ContentHash()
+		}
+		if earlier, duplicate := seen[discovery.ExternalID]; duplicate {
+			earlier.Occurrences++
+			continue
+		}
+		seen[discovery.ExternalID] = discovery
+		prepared = append(prepared, discovery)
 	}
+	return prepared, nil
+}
 
-	tx, err := s.db.Begin()
+func findDiscoveryByExternalID(
+	tx *sql.Tx,
+	projectID int64,
+	externalID string,
+) (int64, error) {
+	if strings.TrimSpace(externalID) == "" {
+		return 0, nil
+	}
+	var id int64
+	err := tx.QueryRow(`
+		SELECT id FROM discoveries WHERE project_id = ? AND external_id = ?
+	`, projectID, externalID).Scan(&id)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
 	if err != nil {
-		return nil, fmt.Errorf("begin create discoveries: %w", err)
+		return 0, fmt.Errorf("find discovery by external ID: %w", err)
 	}
-	defer tx.Rollback()
-	if err := requireProject(tx, projectID); err != nil {
-		return nil, err
+	return id, nil
+}
+
+// recordDiscoverySighting counts a repeat observation without touching the
+// existing record's decision, status, or reason.
+func recordDiscoverySighting(
+	tx *sql.Tx,
+	existingID int64,
+	sighting *domain.Discovery,
+	now time.Time,
+) error {
+	if _, err := tx.Exec(`
+		UPDATE discoveries
+		SET occurrences = occurrences + ?, updated_at = ?
+		WHERE id = ?
+	`, maxInt(sighting.Occurrences, 1), now, existingID); err != nil {
+		return fmt.Errorf("record discovery sighting: %w", err)
 	}
-	now := time.Now().UTC()
-	ids := make([]int64, 0, len(discoveries))
-	for index, discovery := range discoveries {
-		result, err := tx.Exec(`
-			INSERT INTO discoveries (
-				project_id, source_task_id, source_execution_id, external_id,
-				title, description, category, severity, blocks_current,
-				architecture_risk, suggested_action, status, decision_reason,
-				created_issue_number, backlog_position, created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`,
-			discovery.ProjectID,
-			nullablePositive(discovery.SourceTaskID),
-			nullablePositive(discovery.SourceExecutionID),
-			discovery.ExternalID,
-			discovery.Title,
-			discovery.Description,
-			string(discovery.Category),
-			string(discovery.Severity),
-			discovery.BlocksCurrent,
-			discovery.ArchitectureRisk,
-			discovery.SuggestedAction,
-			string(discovery.Status),
-			discovery.DecisionReason,
-			discovery.CreatedIssueNumber,
-			discovery.BacklogPosition,
-			now,
-			now,
-		)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"insert discovery %d: %w",
-				index,
-				classifyDiscoveryConstraint(err),
-			)
+	return nil
+}
+
+func insertDiscovery(
+	tx *sql.Tx,
+	discovery *domain.Discovery,
+	now time.Time,
+) (int64, error) {
+	result, err := tx.Exec(`
+		INSERT INTO discoveries (
+			project_id, source_task_id, source_execution_id, external_id,
+			title, description, category, severity, blocks_current,
+			architecture_risk, suggested_action, status, decision_reason,
+			created_issue_number, backlog_position, occurrences, linked_task_id,
+			created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		discovery.ProjectID,
+		nullablePositive(discovery.SourceTaskID),
+		nullablePositive(discovery.SourceExecutionID),
+		discovery.ExternalID,
+		discovery.Title,
+		discovery.Description,
+		string(discovery.Category),
+		string(discovery.Severity),
+		discovery.BlocksCurrent,
+		discovery.ArchitectureRisk,
+		discovery.SuggestedAction,
+		string(discovery.Status),
+		discovery.DecisionReason,
+		discovery.CreatedIssueNumber,
+		discovery.BacklogPosition,
+		maxInt(discovery.Occurrences, 1),
+		nullableInt64(discovery.LinkedTaskID),
+		now,
+		now,
+	)
+	if err != nil {
+		return 0, classifyDiscoveryConstraint(err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("read discovery ID: %w", err)
+	}
+	return id, nil
+}
+
+// findBacklogTaskByTitle links a discovery to work the project already plans
+// to do. Terminal tasks are ignored: they cannot absorb new work.
+func findBacklogTaskByTitle(
+	tx *sql.Tx,
+	projectID int64,
+	title string,
+) (*int64, error) {
+	normalized := domain.NormalizeDiscoveryTitle(title)
+	if normalized == "" {
+		return nil, nil
+	}
+	rows, err := tx.Query(`
+		SELECT id, title FROM project_tasks
+		WHERE project_id = ?
+		AND status NOT IN ('completed', 'cancelled', 'deferred')
+		ORDER BY sequence ASC, id ASC
+	`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("search backlog for discovery: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var taskTitle string
+		if err := rows.Scan(&id, &taskTitle); err != nil {
+			return nil, fmt.Errorf("scan backlog for discovery: %w", err)
 		}
-		id, err := result.LastInsertId()
-		if err != nil {
-			return nil, fmt.Errorf("read discovery %d ID: %w", index, err)
+		if domain.NormalizeDiscoveryTitle(taskTitle) == normalized {
+			matched := id
+			return &matched, nil
 		}
-		ids = append(ids, id)
 	}
-	if err := touchProject(tx, projectID, now); err != nil {
-		return nil, err
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate backlog for discovery: %w", err)
 	}
-	first := discoveries[0]
+	return nil, nil
+}
+
+func appendDiscoveryBatchFact(
+	tx *sql.Tx,
+	projectID int64,
+	first *domain.Discovery,
+	createdIDs, duplicateIDs []int64,
+	idempotencyKey string,
+) error {
 	var taskID, executionID *int64
 	if first.SourceTaskID > 0 {
 		value := first.SourceTaskID
@@ -113,38 +285,30 @@ func (s *Store) CreateDiscoveries(
 		value := first.SourceExecutionID
 		executionID = &value
 	}
-	if err := appendWorkflowFactTx(
+	return appendWorkflowFactTx(
 		tx,
 		projectID,
 		taskID,
 		executionID,
 		domain.WorkflowSourceWorkflow,
 		domain.WorkflowDiscoveriesRecorded,
-		fmt.Sprintf("Recorded %d discovery/discoveries.", len(discoveries)),
+		fmt.Sprintf(
+			"Recorded %d new and %d repeat discovery/discoveries.",
+			len(createdIDs),
+			len(duplicateIDs),
+		),
 		map[string]any{
-			"count":          len(discoveries),
-			"discovery_ids":  ids,
-			"task_id":        first.SourceTaskID,
-			"execution_id":   first.SourceExecutionID,
-			"recorded_first": first.Title,
+			"created_count":     len(createdIDs),
+			"duplicate_count":   len(duplicateIDs),
+			"discovery_ids":     createdIDs,
+			"duplicate_ids":     duplicateIDs,
+			"task_id":           first.SourceTaskID,
+			"execution_id":      first.SourceExecutionID,
+			"recorded_first":    first.Title,
+			"first_external_id": first.ExternalID,
 		},
 		strings.TrimSpace(idempotencyKey),
-	); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit create discoveries: %w", err)
-	}
-
-	stored := make([]*domain.Discovery, 0, len(ids))
-	for _, id := range ids {
-		discovery, err := s.GetDiscoveryByID(id)
-		if err != nil {
-			return nil, err
-		}
-		stored = append(stored, discovery)
-	}
-	return stored, nil
+	)
 }
 
 func (s *Store) GetDiscoveryByID(id int64) (*domain.Discovery, error) {
@@ -152,6 +316,21 @@ func (s *Store) GetDiscoveryByID(id int64) (*domain.Discovery, error) {
 		return nil, fmt.Errorf("%w: ID %d", ErrDiscoveryNotFound, id)
 	}
 	return scanDiscovery(s.db.QueryRow(discoverySelect+` WHERE id = ?`, id))
+}
+
+// GetDiscoveryByExternalID resolves a discovery by its stable content identity.
+func (s *Store) GetDiscoveryByExternalID(
+	projectID int64,
+	externalID string,
+) (*domain.Discovery, error) {
+	if projectID <= 0 || strings.TrimSpace(externalID) == "" {
+		return nil, nil
+	}
+	return scanDiscovery(s.db.QueryRow(
+		discoverySelect+` WHERE project_id = ? AND external_id = ?`,
+		projectID,
+		externalID,
+	))
 }
 
 // ListDiscoveries returns the project's discoveries in insertion order.
@@ -203,6 +382,8 @@ func classifyDiscoveryConstraint(err error) error {
 		strings.Contains(message, "discovery execution must belong"),
 		strings.Contains(message, "FOREIGN KEY constraint failed"):
 		return fmt.Errorf("%w: %v", ErrDiscoveryOwnership, err)
+	case strings.Contains(message, "idx_discoveries_external_id"):
+		return fmt.Errorf("%w: duplicate external ID: %v", domain.ErrInvalidDiscovery, err)
 	case strings.Contains(message, "CHECK constraint failed"):
 		return fmt.Errorf("%w: %v", domain.ErrInvalidDiscovery, err)
 	default:
@@ -217,12 +398,20 @@ func nullablePositive(value int64) any {
 	return value
 }
 
+func maxInt(value, floor int) int {
+	if value < floor {
+		return floor
+	}
+	return value
+}
+
 const discoverySelect = `
 	SELECT
 		id, project_id, source_task_id, source_execution_id, external_id,
 		title, description, category, severity, blocks_current,
 		architecture_risk, suggested_action, status, decision_reason,
-		created_issue_number, backlog_position, created_at, updated_at
+		created_issue_number, backlog_position, occurrences, linked_task_id,
+		created_at, updated_at
 	FROM discoveries
 `
 
@@ -230,6 +419,7 @@ func scanDiscovery(row scanner) (*domain.Discovery, error) {
 	var (
 		discovery                    domain.Discovery
 		sourceTaskID, sourceExecID   sql.NullInt64
+		linkedTaskID                 sql.NullInt64
 		category, severity, status   string
 		blocksCurrent, architectural int
 	)
@@ -250,6 +440,8 @@ func scanDiscovery(row scanner) (*domain.Discovery, error) {
 		&discovery.DecisionReason,
 		&discovery.CreatedIssueNumber,
 		&discovery.BacklogPosition,
+		&discovery.Occurrences,
+		&linkedTaskID,
 		&discovery.CreatedAt,
 		&discovery.UpdatedAt,
 	); err != nil {
@@ -260,6 +452,7 @@ func scanDiscovery(row scanner) (*domain.Discovery, error) {
 	}
 	discovery.SourceTaskID = sourceTaskID.Int64
 	discovery.SourceExecutionID = sourceExecID.Int64
+	discovery.LinkedTaskID = nullInt64Pointer(linkedTaskID)
 	discovery.Category = domain.DiscoveryCategory(category)
 	discovery.Severity = domain.DiscoverySeverity(severity)
 	discovery.Status = domain.DiscoveryStatus(status)

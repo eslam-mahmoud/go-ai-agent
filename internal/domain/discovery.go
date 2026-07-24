@@ -1,10 +1,13 @@
 package domain
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 )
 
 type DiscoveryCategory string
@@ -77,8 +80,11 @@ type Discovery struct {
 	DecisionReason     string
 	CreatedIssueNumber int
 	BacklogPosition    int
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	// Occurrences counts how many executions reported this same finding.
+	Occurrences  int
+	LinkedTaskID *int64
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 // NewDiscovery constructs an unevaluated discovery attributed to the task and
@@ -97,6 +103,7 @@ func NewDiscovery(
 		Category:          category,
 		Severity:          severity,
 		Status:            DiscoveryUnevaluated,
+		Occurrences:       1,
 	}
 }
 
@@ -210,6 +217,10 @@ func (discovery *Discovery) Validate() error {
 		return fmt.Errorf("%w: created issue number cannot be negative", ErrInvalidDiscovery)
 	case discovery.BacklogPosition < 0:
 		return fmt.Errorf("%w: backlog position cannot be negative", ErrInvalidDiscovery)
+	case discovery.Occurrences < 1:
+		return fmt.Errorf("%w: occurrences must be at least one", ErrInvalidDiscovery)
+	case discovery.LinkedTaskID != nil && *discovery.LinkedTaskID <= 0:
+		return fmt.Errorf("%w: linked task ID must be positive", ErrInvalidDiscovery)
 	case strings.TrimSpace(discovery.ExternalID) != discovery.ExternalID:
 		return fmt.Errorf(
 			"%w: external ID cannot have surrounding whitespace",
@@ -218,4 +229,43 @@ func (discovery *Discovery) Validate() error {
 	default:
 		return nil
 	}
+}
+
+// NormalizeDiscoveryTitle folds a title to its comparable form: lower case,
+// punctuation dropped, and internal whitespace collapsed. Two reports of the
+// same finding rarely agree on casing or trailing punctuation.
+func NormalizeDiscoveryTitle(title string) string {
+	var builder strings.Builder
+	builder.Grow(len(title))
+	pendingSpace := false
+	for _, symbol := range strings.ToLower(strings.TrimSpace(title)) {
+		switch {
+		case unicode.IsLetter(symbol) || unicode.IsDigit(symbol):
+			if pendingSpace && builder.Len() > 0 {
+				builder.WriteByte(' ')
+			}
+			pendingSpace = false
+			builder.WriteRune(symbol)
+		default:
+			// Punctuation and whitespace both collapse to one separator.
+			pendingSpace = true
+		}
+	}
+	return builder.String()
+}
+
+// DiscoveryFingerprint is the comparable identity of a finding: the same
+// category and normalized title describe the same work.
+func DiscoveryFingerprint(category DiscoveryCategory, title string) string {
+	return string(category) + "|" + NormalizeDiscoveryTitle(title)
+}
+
+// ContentHash derives the stable external ID. It is deterministic across
+// processes and runs so independent executions converge on one identity.
+func (discovery *Discovery) ContentHash() string {
+	if discovery == nil {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(DiscoveryFingerprint(discovery.Category, discovery.Title)))
+	return "disc-" + hex.EncodeToString(sum[:])[:16]
 }

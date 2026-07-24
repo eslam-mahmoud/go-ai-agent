@@ -159,3 +159,33 @@ func TestExtractDiscoveriesAcceptsTasklessAndExecutionlessSources(t *testing.T) 
 		t.Fatalf("discoveries = %#v", discoveries)
 	}
 }
+
+func TestExtractDiscoveriesAssignsStableExternalIDs(t *testing.T) {
+	raw := json.RawMessage(`{"discoveries":[
+		{"title":"Retry budget is unbounded","category":"bug","severity":"high"},
+		{"title":"Token is logged","category":"security","severity":"high","external_id":"sec-1"}
+	]}`)
+	first, err := ExtractDiscoveries(raw, 7, 3, 9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first[0].ExternalID == "" || !strings.HasPrefix(first[0].ExternalID, "disc-") {
+		t.Fatalf("derived external ID = %q", first[0].ExternalID)
+	}
+	if first[1].ExternalID != "sec-1" {
+		t.Fatalf("supplied external ID = %q", first[1].ExternalID)
+	}
+
+	// A different execution reporting the same finding must converge.
+	cosmetic := json.RawMessage(`{"discoveries":[
+		{"title":"  RETRY budget, is unbounded!  ","category":"bug","severity":"low"}
+	]}`)
+	second, err := ExtractDiscoveries(cosmetic, 7, 4, 11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second[0].ExternalID != first[0].ExternalID {
+		t.Fatalf("external IDs diverged: %q vs %q",
+			second[0].ExternalID, first[0].ExternalID)
+	}
+}

@@ -384,3 +384,39 @@ func ManagerReviewRequired(status domain.TaskStatus) bool {
 		return false
 	}
 }
+
+// LabelNamespace prefixes every label Madar manages. Labels outside it belong
+// to humans and must survive reconciliation.
+const LabelNamespace = "madar:"
+
+// TaskStatusLabel returns the published label for a task status, and whether
+// the status is published at all. Cancelled and deferred work carries no
+// status label: it is not in the delivery lane.
+func TaskStatusLabel(status domain.TaskStatus) (string, bool) {
+	switch status {
+	case domain.TaskProposed, domain.TaskQueued:
+		return LabelNamespace + "queued", true
+	case domain.TaskSelected:
+		return LabelNamespace + "selected", true
+	case domain.TaskPlanning:
+		return LabelNamespace + "planning", true
+	case domain.TaskWaitingInput:
+		return LabelNamespace + "waiting-input", true
+	case domain.TaskDeveloping:
+		return LabelNamespace + "developing", true
+	case domain.TaskReviewing:
+		return LabelNamespace + "reviewing", true
+	case domain.TaskFixing:
+		return LabelNamespace + "fixing", true
+	case domain.TaskVerifying:
+		return LabelNamespace + "verifying", true
+	case domain.TaskWaitingCI:
+		return LabelNamespace + "waiting-ci", true
+	case domain.TaskBlocked:
+		return LabelNamespace + "blocked", true
+	case domain.TaskCompleted:
+		return LabelNamespace + "done", true
+	default:
+		return "", false
+	}
+}

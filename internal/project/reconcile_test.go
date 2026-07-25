@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/eslam-mahmoud/go-ai-agent/internal/domain"
@@ -311,10 +312,27 @@ type reconcileClient struct {
 	pulls       map[string][]*githubclient.PullRequest
 	labelWrites int
 	closes      int
-	// reads counts reconciliation passes that reached GitHub.
+	// reads counts reconciliation passes that reached GitHub. The scheduler
+	// tests read it from a different goroutine than the one that increments
+	// it, so it is guarded.
+	mu         sync.Mutex
 	reads      int
 	lastLabels []string
 	getErr     error
+}
+
+// readCount returns the reads so far.
+func (fake *reconcileClient) readCount() int {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	return fake.reads
+}
+
+// resetReads zeroes the counter between measurement phases.
+func (fake *reconcileClient) resetReads() {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	fake.reads = 0
 }
 
 func newReconcileClient() *reconcileClient {
@@ -329,7 +347,9 @@ func (fake *reconcileClient) GetIssue(
 	_, _ string,
 	number int,
 ) (*githubclient.Issue, error) {
+	fake.mu.Lock()
 	fake.reads++
+	fake.mu.Unlock()
 	if fake.getErr != nil {
 		return nil, fake.getErr
 	}

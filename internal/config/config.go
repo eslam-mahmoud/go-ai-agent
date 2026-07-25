@@ -1,8 +1,10 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -10,20 +12,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// RepoConfig describes a watched repository. The YAML form accepts either a
-// plain string ("owner/repo") or an object with optional per-repo overrides.
-type RepoConfig struct {
-	Name        string
-	AutoMerge   *bool  // nil → inherit from CI.AutoMerge
-	MergeMethod string // "" → inherit from CI.MergeMethod; valid: merge|squash|rebase
-}
-
 type Config struct {
-	PollInterval time.Duration
-	Concurrency  ConcurrencyConfig
-	Labels       LabelsConfig
-	Repos        []RepoConfig
-	ContextDir   string
 	Claude       ClaudeConfig
 	CI           CIConfig
 	Cleanup      CleanupConfig
@@ -35,40 +24,6 @@ type Config struct {
 	DBPath       string
 	WorkspaceDir string
 	ConfigPath   string // path of the loaded config file; set by Load
-}
-
-// RepoNames returns the name field of every configured repo.
-func (cfg *Config) RepoNames() []string {
-	names := make([]string, len(cfg.Repos))
-	for i, r := range cfg.Repos {
-		names[i] = r.Name
-	}
-	return names
-}
-
-// EffectiveAutoMerge returns the auto-merge setting for fullRepo,
-// falling back to the global CI.AutoMerge when no per-repo override is set.
-func (cfg *Config) EffectiveAutoMerge(fullRepo string) bool {
-	for _, r := range cfg.Repos {
-		if r.Name == fullRepo && r.AutoMerge != nil {
-			return *r.AutoMerge
-		}
-	}
-	return cfg.CI.AutoMerge
-}
-
-// EffectiveMergeMethod returns the merge method for fullRepo,
-// falling back to CI.MergeMethod and then "merge".
-func (cfg *Config) EffectiveMergeMethod(fullRepo string) string {
-	for _, r := range cfg.Repos {
-		if r.Name == fullRepo && r.MergeMethod != "" {
-			return r.MergeMethod
-		}
-	}
-	if cfg.CI.MergeMethod != "" {
-		return cfg.CI.MergeMethod
-	}
-	return "merge"
 }
 
 type CIConfig struct {
@@ -89,7 +44,6 @@ type CleanupConfig struct {
 // ProjectConfig selects and configures v2 project mode. It is opt-in: an
 // existing installation keeps running v1 issue mode until it says otherwise.
 type ProjectConfig struct {
-	Enabled        bool
 	Repo           string
 	AutoInitialize bool
 	Interval       time.Duration
@@ -123,18 +77,6 @@ type ReconcileConfig struct {
 	OnStartup bool          // reconcile once before picking up work (default true)
 }
 
-type ConcurrencyConfig struct {
-	Enabled     bool
-	MaxParallel int
-}
-
-type LabelsConfig struct {
-	Ready            string
-	InProgress       string
-	AwaitingFeedback string
-	Done             string
-}
-
 type ClaudeConfig struct {
 	Bin                   string // path to the claude CLI binary
 	Model                 string // optional model pinned to each new legacy execution
@@ -165,48 +107,8 @@ type TelegramConfig struct {
 	MaxControlPerLimit  int
 }
 
-// rawRepoConfig supports both plain-string and object YAML forms:
-//
-//	repos:
-//	  - owner/repo               # plain string
-//	  - name: owner/repo2        # object with overrides
-//	    auto_merge: true
-//	    merge_method: squash
-type rawRepoConfig struct {
-	Name        string `yaml:"name"`
-	AutoMerge   *bool  `yaml:"auto_merge"`
-	MergeMethod string `yaml:"merge_method"`
-}
-
-func (r *rawRepoConfig) UnmarshalYAML(value *yaml.Node) error {
-	if value.Kind == yaml.ScalarNode {
-		r.Name = value.Value
-		return nil
-	}
-	type alias rawRepoConfig
-	var a alias
-	if err := value.Decode(&a); err != nil {
-		return err
-	}
-	*r = rawRepoConfig(a)
-	return nil
-}
-
 type rawConfig struct {
-	PollIntervalSeconds int `yaml:"poll_interval_seconds"`
-	Concurrency         struct {
-		Enabled     bool `yaml:"enabled"`
-		MaxParallel int  `yaml:"max_parallel"`
-	} `yaml:"concurrency"`
-	Labels struct {
-		Ready            string `yaml:"ready"`
-		InProgress       string `yaml:"in_progress"`
-		AwaitingFeedback string `yaml:"awaiting_feedback"`
-		Done             string `yaml:"done"`
-	} `yaml:"labels"`
-	Repos      []rawRepoConfig `yaml:"repos"`
-	ContextDir string          `yaml:"context_dir"`
-	Claude     struct {
+	Claude struct {
 		Bin                   string  `yaml:"bin"`
 		Model                 string  `yaml:"model"`
 		OutputFormat          string  `yaml:"output_format"`
@@ -231,7 +133,6 @@ type rawConfig struct {
 		OnStartup   *bool  `yaml:"on_startup"`
 	} `yaml:"reconcile"`
 	Project struct {
-		Enabled        bool   `yaml:"enabled"`
 		Repo           string `yaml:"repo"`
 		AutoInitialize bool   `yaml:"auto_initialize"`
 		IntervalStr    string `yaml:"interval"`
@@ -281,6 +182,10 @@ func Load(configPath, envPath string) (*Config, error) {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 
+	if err := rejectRemovedKeys(data); err != nil {
+		return nil, err
+	}
+
 	var raw rawConfig
 	dec := yaml.NewDecoder(strings.NewReader(string(data)))
 	dec.KnownFields(true)
@@ -322,9 +227,6 @@ func Load(configPath, envPath string) (*Config, error) {
 			return nil, fmt.Errorf("project.budgets.%s cannot be negative", name)
 		}
 	}
-	if raw.Project.Enabled && strings.TrimSpace(raw.Project.Repo) == "" {
-		return nil, fmt.Errorf("project.repo is required when project mode is enabled")
-	}
 	commandMaxAge, err := time.ParseDuration(raw.Telegram.CommandMaxAgeStr)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -361,19 +263,6 @@ func Load(configPath, envPath string) (*Config, error) {
 	telegramIDs := splitCSV(os.Getenv("TELEGRAM_ALLOWED_IDS"))
 
 	cfg := &Config{
-		PollInterval: time.Duration(raw.PollIntervalSeconds) * time.Second,
-		Concurrency: ConcurrencyConfig{
-			Enabled:     raw.Concurrency.Enabled,
-			MaxParallel: raw.Concurrency.MaxParallel,
-		},
-		Labels: LabelsConfig{
-			Ready:            raw.Labels.Ready,
-			InProgress:       raw.Labels.InProgress,
-			AwaitingFeedback: raw.Labels.AwaitingFeedback,
-			Done:             raw.Labels.Done,
-		},
-		Repos:      rawToRepoConfigs(raw.Repos),
-		ContextDir: raw.ContextDir,
 		Claude: ClaudeConfig{
 			Bin:                   raw.Claude.Bin,
 			Model:                 raw.Claude.Model,
@@ -406,7 +295,6 @@ func Load(configPath, envPath string) (*Config, error) {
 			MergeMethod:  raw.CI.MergeMethod,
 		},
 		Project: ProjectConfig{
-			Enabled:        raw.Project.Enabled,
 			Repo:           strings.TrimSpace(raw.Project.Repo),
 			AutoInitialize: raw.Project.AutoInitialize,
 			Interval:       projectInterval,
@@ -442,36 +330,47 @@ func Load(configPath, envPath string) (*Config, error) {
 	return cfg, nil
 }
 
-func rawToRepoConfigs(raw []rawRepoConfig) []RepoConfig {
-	out := make([]RepoConfig, len(raw))
-	for i, r := range raw {
-		out[i] = RepoConfig{Name: r.Name, AutoMerge: r.AutoMerge, MergeMethod: r.MergeMethod}
+// removedKeys maps each key that v1 issue mode owned to what replaces it.
+// A stale key is refused rather than ignored: an operator who still has
+// `repos:` in their config believes work is queued against those repositories,
+// and silence would let them go on believing it.
+var removedKeys = map[string]string{
+	"repos":                 "project.repo — one managed project per daemon",
+	"labels":                "removed; task state lives in the database, not in issue labels",
+	"concurrency":           "removed; delivery is sequential by design, one task at a time",
+	"poll_interval_seconds": "project.interval",
+	"context_dir":           "removed; modes read the project's own .madar/ documents",
+}
+
+// rejectRemovedKeys reports every stale v1 key at once, so migrating is one
+// edit rather than a sequence of failed starts.
+func rejectRemovedKeys(data []byte) error {
+	var top map[string]yaml.Node
+	if err := yaml.Unmarshal(data, &top); err != nil {
+		// Malformed YAML is the decoder's error to report, with its line
+		// numbers, rather than something to guess at here.
+		return nil
 	}
-	return out
+	found := make([]string, 0, len(removedKeys))
+	for key := range top {
+		if _, removed := removedKeys[key]; removed {
+			found = append(found, key)
+		}
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	sort.Strings(found)
+	var message strings.Builder
+	message.WriteString("config uses keys removed with v1 issue mode:")
+	for _, key := range found {
+		fmt.Fprintf(&message, "\n  %s → %s", key, removedKeys[key])
+	}
+	message.WriteString("\n\nMadar now runs one managed project. See the README section \"Configuration Reference\".")
+	return errors.New(message.String())
 }
 
 func applyDefaults(raw *rawConfig) {
-	if raw.PollIntervalSeconds == 0 {
-		raw.PollIntervalSeconds = 45
-	}
-	if raw.Concurrency.MaxParallel == 0 {
-		raw.Concurrency.MaxParallel = 1
-	}
-	if raw.Labels.Ready == "" {
-		raw.Labels.Ready = "ready"
-	}
-	if raw.Labels.InProgress == "" {
-		raw.Labels.InProgress = "in-progress"
-	}
-	if raw.Labels.AwaitingFeedback == "" {
-		raw.Labels.AwaitingFeedback = "awaiting-feedback"
-	}
-	if raw.Labels.Done == "" {
-		raw.Labels.Done = "done"
-	}
-	if raw.ContextDir == "" {
-		raw.ContextDir = ".claude-context"
-	}
 	if raw.Claude.OutputFormat == "" {
 		raw.Claude.OutputFormat = "stream-json"
 	}

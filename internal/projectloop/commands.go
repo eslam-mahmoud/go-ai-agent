@@ -11,9 +11,9 @@ import (
 	"github.com/eslam-mahmoud/go-ai-agent/internal/store"
 )
 
-// BuildCommands assembles the owner command surface. Like Build it returns a
-// nil router with a nil error when project mode is off, so the daemon can call
-// it unconditionally.
+// BuildCommands assembles the owner command surface. It returns a nil router
+// with a nil error when no Telegram ID is allowed to issue commands, since a
+// surface that authorizes nobody would exist only to refuse everything.
 //
 // Read-only and mutating commands are registered together here because a
 // deployment that runs the delivery loop is by definition one where the owner
@@ -21,8 +21,8 @@ import (
 func BuildCommands(
 	cfg *config.Config, projectStore *store.Store,
 ) (*command.Router, error) {
-	if cfg == nil || !cfg.Project.Enabled {
-		return nil, nil
+	if cfg == nil {
+		return nil, fmt.Errorf("%w: config is required for commands", ErrInvalidLoop)
 	}
 	if projectStore == nil {
 		return nil, fmt.Errorf("%w: store is required for commands", ErrInvalidLoop)

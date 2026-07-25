@@ -62,21 +62,36 @@ func TestRunReconcilesAtStartupThenOnTheInterval(t *testing.T) {
 	if _, err := fixture.scheduler(t, client, 0).ReconcileOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	perPass := client.reads
+	perPass := client.readCount()
 	if perPass == 0 {
 		t.Fatal("a pass performed no reads")
 	}
-	client.reads = 0
+	client.resetReads()
 
-	scheduler := fixture.scheduler(t, client, 20*time.Millisecond)
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	// Wait for the second pass rather than racing a fixed deadline: a loaded
+	// machine can make one pass take longer than a short timeout, which says
+	// nothing about whether the scheduler ticks.
+	scheduler := fixture.scheduler(t, client, 10*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := scheduler.Run(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Run error = %v", err)
+	done := make(chan error, 1)
+	go func() { done <- scheduler.Run(ctx) }()
+
+	deadline := time.After(30 * time.Second)
+	for client.readCount() < 2*perPass {
+		select {
+		case <-deadline:
+			cancel()
+			t.Fatalf("scheduler read %d times, want at least %d",
+				client.readCount(), 2*perPass)
+		case err := <-done:
+			t.Fatalf("Run exited early: %v", err)
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
-	// One startup pass plus at least one tick.
-	if client.reads < 2*perPass {
-		t.Fatalf("scheduler read %d times, want at least %d", client.reads, 2*perPass)
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v", err)
 	}
 }
 
@@ -89,8 +104,8 @@ func TestRunWithoutAnIntervalReconcilesOnlyOnce(t *testing.T) {
 	if _, err := fixture.scheduler(t, client, 0).ReconcileOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	perPass := client.reads
-	client.reads = 0
+	perPass := client.readCount()
+	client.resetReads()
 
 	scheduler := fixture.scheduler(t, client, 0)
 	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
@@ -99,7 +114,7 @@ func TestRunWithoutAnIntervalReconcilesOnlyOnce(t *testing.T) {
 		t.Fatalf("Run error = %v", err)
 	}
 	// The startup pass only: a zero interval schedules nothing further.
-	if client.reads != perPass {
+	if client.readCount() != perPass {
 		t.Fatalf("disabled interval read %d times, want %d", client.reads, perPass)
 	}
 }

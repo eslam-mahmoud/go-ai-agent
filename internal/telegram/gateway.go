@@ -18,9 +18,13 @@ type Update struct {
 
 // Message is the subset of Telegram message fields Madar uses.
 type Message struct {
-	MessageID int64  `json:"message_id"`
-	Text      string `json:"text"`
-	Chat      struct {
+	MessageID int64 `json:"message_id"`
+	// Date is the Unix time Telegram recorded for the message. Command expiry
+	// is measured against it, so a backlog delivered after an outage cannot
+	// act on instructions written long ago.
+	Date int64  `json:"date"`
+	Text string `json:"text"`
+	Chat struct {
 		ID int64 `json:"id"`
 	} `json:"chat"`
 	From struct {

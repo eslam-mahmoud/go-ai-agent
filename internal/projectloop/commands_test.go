@@ -22,28 +22,15 @@ func openStore(t *testing.T) *store.Store {
 	return opened
 }
 
-func projectConfig(enabled bool, allowed ...string) *config.Config {
+func projectConfig(allowed ...string) *config.Config {
 	cfg := &config.Config{}
-	cfg.Project.Enabled = enabled
 	cfg.Project.Repo = "owner/repo"
 	cfg.Telegram.AllowedIDs = allowed
 	return cfg
 }
 
-// v2 must never turn itself on: an existing installation upgrading to this
-// build has to keep behaving exactly as it did.
-func TestCommandsAreAbsentUnlessProjectModeIsEnabled(t *testing.T) {
-	router, err := BuildCommands(projectConfig(false, "42"), openStore(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if router != nil {
-		t.Fatal("project commands must not exist when project mode is off")
-	}
-}
-
 func TestCommandsRegisterBothSurfacesWhenEnabled(t *testing.T) {
-	router, err := BuildCommands(projectConfig(true, "42", " 43 "), openStore(t))
+	router, err := BuildCommands(projectConfig("42", " 43 "), openStore(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +49,7 @@ func TestCommandsRegisterBothSurfacesWhenEnabled(t *testing.T) {
 // A surface that authorizes nobody would refuse every message while looking
 // like it works, so it is not built at all.
 func TestCommandsAreAbsentWithAnEmptyAllowlist(t *testing.T) {
-	router, err := BuildCommands(projectConfig(true), openStore(t))
+	router, err := BuildCommands(projectConfig(), openStore(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,25 +60,35 @@ func TestCommandsAreAbsentWithAnEmptyAllowlist(t *testing.T) {
 
 // Dropping an unparsable ID would silently lock the owner out of their agent.
 func TestAMalformedAllowedIDIsAnError(t *testing.T) {
-	if _, err := BuildCommands(projectConfig(true, "not-a-number"), openStore(t)); err == nil {
+	if _, err := BuildCommands(projectConfig("not-a-number"), openStore(t)); err == nil {
 		t.Fatal("expected a malformed Telegram ID to be reported")
 	}
 }
 
-func TestBuildIsANoOpWhenProjectModeIsOff(t *testing.T) {
-	loop, err := Build(Dependencies{Config: projectConfig(false), Store: openStore(t)})
-	if err != nil {
-		t.Fatal(err)
+// Every collaborator the loop cannot work without must be reported by name.
+// A loop built from an incomplete set would fail later, further from the cause.
+func TestBuildReportsMissingCollaborators(t *testing.T) {
+	tests := []struct {
+		name         string
+		dependencies Dependencies
+	}{
+		{"no config", Dependencies{Store: openStore(t)}},
+		{"no store", Dependencies{Config: projectConfig("42"), Engine: stubEngine{}}},
+		{"no engine", Dependencies{Config: projectConfig("42"), Store: openStore(t)}},
 	}
-	if loop != nil {
-		t.Fatal("the delivery loop must not run when project mode is off")
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := Build(test.dependencies); err == nil {
+				t.Fatal("expected the missing collaborator to be reported")
+			}
+		})
 	}
 }
 
 // Enabling project mode against a repository with no v2 project must say so
 // rather than start a loop that can never do anything.
 func TestBuildReportsAMissingProject(t *testing.T) {
-	cfg := projectConfig(true, "42")
+	cfg := projectConfig("42")
 	cfg.WorkspaceDir = t.TempDir()
 	_, err := Build(Dependencies{
 		Config: cfg,

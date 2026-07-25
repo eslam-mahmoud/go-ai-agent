@@ -1,655 +1,646 @@
 # Madar — Autonomous Coding Agent
 
-> *Madar (مدار, "orbit") — a single autonomous agent that loops continuously, pulling work from a GitHub Issues board and running it through Claude Code.*
+> *Madar (مدار, "orbit") — an autonomous agent that owns a project goal and orbits it: plan, build, review, verify, decide what's next, repeat.*
 
-Madar is a Go binary that runs on a server (e.g. an EC2 instance) and acts as an autonomous software engineer. You manage work through GitHub — no custom UI, no webhooks, no extra infrastructure.
+Madar is a single Go binary that runs on a server and acts as an autonomous software engineer. You give it a repository and a goal; it maintains a backlog, delivers one task at a time through the Claude Code CLI, and reports to you on GitHub and Telegram. No custom UI, no webhooks, no extra infrastructure.
 
-Madar has two modes, and it is worth being precise about which one runs today.
-
-| | **v1 — issue mode** | **v2 — project mode** |
-| --- | --- | --- |
-| What it does | Polls labelled GitHub Issues and runs each through the Claude Code CLI | Owns a project goal, plans a backlog, and delivers one task at a time through Planner → Developer → Reviewer → Verifier, with an Engineering Manager deciding what happens next |
-| Status | **This is what the daemon runs.** Supported and unchanged. | Domain, storage, modes, and controllers are implemented and tested. **The delivery loop is not yet driven by the daemon** — see [v2 status](#v2-status). |
-| How you use it | Label an issue `ready` | `madar project` subcommands, plus GitHub reconciliation which the daemon does run |
-
-If you are deploying Madar today, you are deploying v1 issue mode. The v2 sections below describe what exists and what does not.
+**The permanent invariant: one project goal, one active task, one branch, one pull request, and one delivery decision at a time.** Everything below follows from it. Madar is deliberately not a swarm — sequential delivery is what makes its state auditable and its restarts safe.
 
 ---
 
 ## Table of Contents
 
-- [How It Works](#how-it-works) ← v1 issue mode
-- [Madar v2 — Project Mode](#madar-v2--project-mode)
-- [v2 Status](#v2-status) ← what is and is not wired
-- [CI/CD Feedback Loop](#cicd-feedback-loop)
+**Getting started**
+- [Prerequisites](#prerequisites)
+- [Install](#install)
+- [First run](#first-run)
+- [Checking status](#checking-status)
+- [Updating](#updating)
+- [Rotating credentials](#rotating-credentials)
+- [Uninstalling](#uninstalling)
+
+**Understanding it**
+- [How it works](#how-it-works)
+- [Owner commands](#owner-commands)
+- [Safety](#safety)
+- [CI/CD feedback loop](#cicd-feedback-loop)
 - [Architecture](#architecture)
-- [Design Decisions](#design-decisions)
-- [Installation](#installation) ← one-command curl installer
-- [Environment Variables](#environment-variables)
-- [Configuration Reference](#configuration-reference)
-- [GitHub Issue Workflow](#github-issue-workflow)
-- [Running Madar](#running-madar)
-- [Project Structure](#project-structure)
+- [Design decisions](#design-decisions)
+
+**Reference**
+- [Environment variables](#environment-variables)
+- [Configuration reference](#configuration-reference)
+- [CLI reference](#cli-reference)
+- [Project structure](#project-structure)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
-## How It Works
+## Prerequisites
 
-1. You open a GitHub Issue describing a task and label it `ready`.
-2. Madar picks it up on the next poll (every 15–60 seconds), transitions it to `in-progress`, and runs Claude Code against a local clone of the repo.
-3. If Claude can complete the task, it does so — commits the changes, posts a summary comment, and moves the issue to `done`.
-4. If Claude needs clarification, it posts a question on the issue, moves it to `awaiting-feedback`, and sends you a Telegram message with a direct link. You reply on GitHub. Madar picks up the reply and resumes the exact same Claude session.
+You need these before installing. The installer will set up the ones marked *auto*.
 
-```
-GitHub Issue (ready)
-       │
-       ▼
-  Madar polls
-       │
-       ▼
-  Claude Code runs in workspace
-       │
-   ┌───┴───┐
-   │       │
- done   needs input
-   │       │
-   ▼       ▼
- comment  comment + Telegram
- "done"   "awaiting-feedback"
-           │
-      you reply on GitHub
-           │
-           ▼
-      Madar resumes session
-           │
-           ▼
-         done
-```
-
----
-
-## Madar v2 — Project Mode
-
-v2 replaces "run whatever issue is labelled ready" with a managed project.
-
-### The permanent invariant
-
-> One project goal, one active task, one branch, one pull request, and one delivery decision at a time.
-
-This is a product decision, not a temporary limitation. Sequential delivery is what keeps an autonomous agent coherent, observable, and recoverable. The single-active-task rule is enforced by a database index, not by convention.
-
-### The delivery cycle
-
-```
-Engineering Manager selects one task, with a recorded reason
-        ↓
-Planner → Developer → Reviewer → Verifier → (CI) → completed
-        ↑         ↓
-        └── fix ──┘   (bounded review/fix cycles)
-        ↓
-Engineering Manager reviews the result
-        ↓
-evaluates discoveries · reorders the backlog · selects the next task
-```
-
-Every transition passes through one validator. A task cannot be selected without a completed manager review, cannot enter development without a plan, and cannot complete without successful verification.
-
-### Discoveries
-
-Implementation reveals work the plan did not anticipate. Any mode can report discoveries; Madar gives each a stable content-derived identity, deduplicates repeats, and requires the manager to decide every pending one before a review can finish. Accepted work becomes a GitHub issue and an ordered backlog task.
-
-### Architecture
-
-An architecture-risk discovery, or a manager request, raises an architecture obligation. While one is outstanding, no new task may be selected. Architect mode proposes component boundaries, decisions, dependencies, and risks; Madar renders them into `AGENTS.md`, `docs/architecture/`, and ADRs, preserving human-authored content.
-
-### Safety
-
-- **Policy** — command and path rules where deny always beats allow, and an unset policy asks rather than allows.
-- **Budgets** — task duration, review/fix cycles, CI fix cycles, and mode retries, all derived from durable history so a restart cannot reset them.
-- **Approvals** — configured high-risk actions require a human decision.
-
-### Reconciliation
-
-Madar compares durable state against GitHub, converges what is safe (status labels within the `madar:` namespace, closing a completed task's issue, binding a branch's pull request), and reports the rest as drift. Labels outside the `madar:` namespace are never touched.
-
----
-
-## v2 Status
-
-The v2 delivery cycle now runs in the daemon, but it is opt-in. This section says exactly what runs and what does not, because a README that implies otherwise is worse than no README.
-
-**Running in the daemon today**
-
-- v1 issue mode — the polling loop, Claude execution, CI feedback, Telegram notifications. Unchanged.
-- **GitHub reconciliation** — one pass at startup before work is picked up, then on `reconcile.interval`. A failing pass is logged and retried; it never stops delivery.
-- **The v2 delivery cycle**, when `project.enabled: true` — see below.
-
-**Enabling v2 project mode**
-
-Project mode is off by default, so upgrading changes nothing until you ask for it. Create the project first, then turn the loop on:
-
-```bash
-madar project create --repo owner/name --name "My Project" --goal "What done looks like"
-```
-
-```yaml
-project:
-  enabled: true
-  repo: owner/name        # required when enabled
-  auto_initialize: false  # let the Architect create the first backlog
-  interval: 30s
-  budgets:                # every zero means unlimited
-    max_task_duration: 0s
-    max_review_fix_cycles: 0
-    max_ci_fix_cycles: 0
-    max_mode_retries: 0
-```
-
-Startup order is deliberate: **v2 recovery, then reconciliation, then delivery**. Recovery repairs what a crash left half-written before reconciliation compares it against GitHub, so a restart never reconciles the wrong thing.
-
-Each tick advances the project exactly one step, which keeps the permanent invariant visible in the logs: one goal, one task, one branch, one delivery decision at a time.
-
-| Project state | What the tick does |
-| --- | --- |
-| paused | nothing |
-| no backlog | initializes it (`auto_initialize`), otherwise idles |
-| no current task | runs an Engineering Manager review to select the next one |
-| task in flight | runs the sequential workflow: planner → developer → reviewer → fixer → verifier |
-| task terminal | runs the manager review, decides discoveries, runs the Architect when the review requires it, publishes, selects the next task |
-| budget exhausted | stops and records `budget.exhausted` |
-
-Mode outputs are written under `<workspace_dir>/.madar/executions/` and referenced from the `executions` table, which is how the developer reads the plan and the fixer reads the review across restarts.
-
-Each tick also attaches any pull request a task's branch has opened, so the verifier sees a PR number rather than zero.
-
-**Optional stages degrade rather than fail.** Without `GITHUB_TOKEN` the cycle still decides but cannot publish issues, discover pull requests, or read CI. Without a Telegram bot token there is no live status message and no command surface. Without `telegram.allowed_ids` the command surface is not built at all, since an empty allowlist authorizes nobody.
-
-**Owner commands.** With project mode on, `/status`, `/project`, `/plan`, `/next`, `/logs`, `/pause`, `/resume`, `/cancel`, and `/retry` are answered by the v2 router, which enforces the allowlist, command expiry, and rate limits. They share the existing Telegram poller; any command the router does not know falls through to the v1 surface unchanged. Note that `/status` is answered by v2 once project mode is on.
-
-**Available from the command line**
-
-| Command | What it does |
-| --- | --- |
-| `madar project create --repo owner/name --name N --goal G` | Create a managed project |
-| `madar project list` / `show --repo owner/name` | Inspect projects and their backlog |
-| `madar project add-task --repo owner/name --title T --goal G` | Add a backlog task |
-| `madar project list-tasks --repo owner/name` | List the ordered backlog |
-| `madar project sync-files --repo owner/name` | Write `.madar/project.yaml` and `.madar/plan.md` |
-| `madar project sync-issue --repo owner/name` | Create or update the parent dashboard issue |
-| `madar project reconcile --repo owner/name` | Run one reconciliation pass and report drift |
-| `madar migrate-project --repo owner/name` | Migrate a v1 repository into a v2 project |
-
-**Sandboxing.** Every mode declares a workspace permission, and both provider adapters enforce it: `read-only` for Planner, Reviewer, Manager, and Architect — they cannot write files, edit code, or run commands — and `workspace-write` for Developer, Fixer, and Verifier. An unknown value is refused rather than ignored. `claude.skip_permissions` remains the explicit, documented way to opt out.
-
-**Safety policy.** An optional `policy:` block adds per-command and per-path rules on top of the sandbox. They are rendered into tool-permission patterns and handed to the provider, so a denied command or a denied write is refused at the moment of the tool call rather than noticed afterwards, when the file has already been written. Deny always wins, and a denied path is denied to every tool that can write it — a rule blocking `Write` but permitting `Edit` would be a rule in name only.
-
-```yaml
-policy:
-  commands:
-    default: ask          # allow | ask | deny — applies when nothing matches
-    allow:
-      - go test ./...
-    deny:
-      - git push --force
-  paths:
-    writable:
-      - "internal/**"
-    deny:
-      - .env              # denied even inside a writable root
-  require_approval:
-    - gh pr merge
-```
-
-An absent block constrains nothing, so upgrading without one behaves exactly as before. **This is enforced on the Claude engine only** — the Codex CLI has no equivalent permission surface, so a Codex deployment gets the sandbox but not the fine-grained rules.
-
----
-
-## CI/CD Feedback Loop
-
-When `ci.enabled: true`, Madar goes beyond just running Claude — it watches the GitHub Actions check suite after Claude opens a PR and automatically re-invokes Claude with the failure output if CI is red. This loops until green or a retry cap is hit, then escalates to you.
-
-```
-Claude commits → pushes branch madar/issue-N → opens PR
-                                                    │
-                                     Madar polls check suite (every 30s)
-                                                    │
-                          ┌─────────────────────────┼──────────────────────┐
-                          │ pending                  │ success              │ failure
-                          │                          │                      │
-                        skip                   finalize                increment retries
-                                              label: done            resume Claude session
-                                              close issue            with failure output
-                                              Telegram ✅                    │
-                                                               ci_state = waiting
-                                                               (loop repeats)
-                                                                      │
-                                                           retries > max_retries
-                                                                      │
-                                                        escalate → awaiting-feedback
-                                                          post question + Telegram 🤔
-```
-
-**What Madar stores per task:** `pr_number`, `ci_state` (`waiting` / `passed` / `failed` / `gave_up`), `ci_retries` — all in SQLite so the state survives restarts.
-
-**Why this is irreplaceable:** The CLI is a one-shot tool. Something has to wait for an async CI event, look up which Claude session corresponds to the failed PR, and resume it with the test output. That requires persistent state no bash script can provide across invocations.
-
-### Enabling CI
-
-```yaml
-ci:
-  enabled: true
-  max_retries: 3       # re-invoke Claude up to N times on failure
-  poll_interval: 30s   # how often to check check suite status
-  wait_timeout: 20m    # give up waiting for CI after this long
-```
-
-Claude is instructed to create a branch named exactly `madar/issue-<N>` and include `PR: #<number>` in its response — Madar parses this to start watching the right branch.
-
----
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Madar (Go binary)                    │
-│                                                         │
-│  ┌─────────────┐   ┌──────────────┐   ┌─────────────┐  │
-│  │ Orchestrator│   │ Claude Runner│   │ GitHub      │  │
-│  │ (poll loop) │──▶│ (CLI wrapper)│   │ Client      │  │
-│  └─────────────┘   └──────────────┘   └─────────────┘  │
-│         │                                    │          │
-│         ▼                                    ▼          │
-│  ┌─────────────┐                    ┌─────────────────┐ │
-│  │   Store     │                    │ Telegram        │ │
-│  │  (SQLite)   │                    │ Gateway         │ │
-│  └─────────────┘                    └─────────────────┘ │
-└─────────────────────────────────────────────────────────┘
-         │                    │
-         ▼                    ▼
-   ./madar.db         workspaces/
-                      owner/repo/   ← cloned git repos
-```
-
-### Components
-
-| Component | File | Responsibility |
+| Requirement | Why | Notes |
 |---|---|---|
-| **Orchestrator** | `internal/orchestrator/loop.go` | Provider-neutral task execution, state transitions, and CI feedback |
-| **Project Domain** | `internal/domain/` | Project, task, execution, artifact, and manager-review records |
-| **Project Controller** | `internal/project/` | Consistent aggregate snapshots, validated task mutations, and derived project state |
-| **Sequential Workflow** | `internal/workflow/` | Canonical task transitions and provider-neutral plan/develop/review/fix/verify coordination |
-| **Engine Kernel** | `internal/engine/` | Provider-neutral contracts, registry, local JSON Schema validation, and errors |
-| **Claude Adapter** | `internal/engine/claude/adapter.go` | Spawn `claude`, parse `stream-json`, and normalize provider behavior |
-| **Codex Adapter** | `internal/engine/codex/adapter.go` | Run `codex exec`/`resume`, parse JSONL, and normalize provider behavior |
-| **Legacy Claude Facade** | `internal/claude/runner.go` | Preserve the v1 runner API and clarification behavior through the adapter |
-| **GitHub Client** | `internal/github/client.go` | List issues, post comments, transition labels |
-| **Store** | `internal/store/` | Transactional SQLite migrations plus legacy task and v2 project persistence |
-| **Telegram Gateway** | `internal/telegram/gateway.go` | Send notifications to allowed chat IDs |
-| **Config** | `internal/config/config.go` | Load `config.yaml` + `.env`, apply defaults |
+| **Linux or macOS** | Service management via systemd or launchd | Windows is not supported |
+| **A Claude subscription or API access** | Madar drives the Claude Code CLI; it does not call the API directly | Authenticated with `claude login` — the credential lives in `~/.claude`, never in Madar's config |
+| **Claude Code CLI** | The thing that actually writes code | *auto* — installed and authenticated during setup |
+| **git** | Cloning and working in the repository | *auto* |
+| **Node.js 18+** | Required by the Claude Code CLI | *auto* |
+| **A GitHub repository you can write to** | Madar opens issues, pushes branches, and opens pull requests | Must be able to create branches and PRs |
+| **A GitHub personal access token** | API access, with `repo` scope | Create at [github.com/settings/tokens](https://github.com/settings/tokens) |
+| **A Telegram bot** *(optional)* | Progress notifications and owner commands | From [@BotFather](https://t.me/botfather). Without it Madar delivers silently |
+| **~2 GB disk** | Binary, database, and the cloned repository | Grows with execution history |
 
-### Task State Machine
-
-```
-ready ──▶ in-progress ──▶ done
-                │
-                ├── process stops ──▶ interrupted ──▶ recovering
-                │                                      │
-                │                                      └──▶ done / awaiting-feedback
-                ▼
-         awaiting-feedback
-                │
-           (you reply)
-                │
-                ▼
-          in-progress ──▶ done
-```
-
-The v2 project workflow uses one validated task transition graph:
-
-```text
-proposed → queued → selected → planning → developing → reviewing
-                        ↘ waiting-input ↗              ↓       ↑
-                                                     fixing ───┘
-                                                       ↓
-                                                   verifying → waiting-ci → completed
-                                                       ↑            │
-                                                       └── fixing ←─┘
-```
-
-Non-terminal work may move to `blocked`, `cancelled`, or `deferred` where
-allowed. Resumption and progress edges require explicit durable evidence such
-as a manager review, completed plan, supplied input, review findings,
-verification results, CI results, blocker resolution, or reprioritization.
-`completed` and `cancelled` are terminal.
-
-Public state is expressed through GitHub Issue labels. SQLite additionally
-uses `interrupted` and `recovering` while restarting an unfinished provider
-execution; the issue keeps its `in-progress` label throughout recovery. The
-store retains the provider session ID so Madar resumes the same session rather
-than asking for routine restart guidance.
-
-### Claude Code Integration
-
-Madar drives the `claude` CLI in headless print mode:
-
-```bash
-# First run — establish session
-claude -p "<rendered issue>" \
-  --session-id <uuid> \
-  --output-format stream-json --verbose \
-  --max-turns 40 \
-  --dangerously-skip-permissions
-
-# Resume after human reply
-claude -p "Maintainer answered: <reply>. Continue." \
-  --resume <uuid> \
-  --output-format stream-json --verbose
-```
-
-Each task maps to exactly one Claude Code session (a UUID stored in SQLite). The session accumulates the full conversation history; on resume Madar appends only the new human reply as the next turn.
-
-**Clarification detection:** The first-run prompt instructs Claude to respond with `NEEDS_CLARIFICATION: <question>` if it cannot proceed. Madar checks the `result` event's text for this prefix.
+Madar has **no CGO dependency** — the SQLite driver is pure Go, so the binary cross-compiles and runs without a system SQLite.
 
 ---
 
-## Design Decisions
+## Install
 
-### Supervise, don't reimplement
-Madar wraps the `claude` CLI rather than reimplementing agentic behavior. Claude Code already handles file edits, shell execution, tool permissions, and session memory. Madar provides the loop, board integration, human-in-the-loop channel, and lifecycle management.
-
-### GitHub Issues as the board
-No custom Kanban UI — GitHub Issues already has search, filtering, labels, comments, and notifications. State transitions are labels; priority is issue ordering. This keeps the system simple and co-locates task tracking with code review (PRs).
-
-### Polling over webhooks
-Polling requires no inbound networking — the EC2 instance needs no open ports. For a single-operator setup the latency (15–60 seconds) is acceptable. Webhooks are a natural v2 upgrade.
-
-### Single-threaded by default
-One active task at a time. The concurrency guard uses the board itself as the lock — if any issue is `in-progress` or `awaiting-feedback`, Madar waits. Parallel execution requires workspace isolation (git worktrees or separate clones) and is a config switch away.
-
-### Session IDs pre-assigned
-Madar mints a UUIDv4 at claim-time and stores it before launching Claude. This means the task ↔ session link exists in SQLite even if the process crashes mid-run — the session can be inspected or resumed without re-running from scratch.
-
-### `--dangerously-skip-permissions` as explicit opt-in
-By default Claude Code gates every tool call interactively. A headless agent cannot respond to permission prompts, so this flag is required for autonomous operation. It is surfaced as an explicit config key (`skip_permissions: true`) so the trade-off is visible. For untrusted repos or shared machines, leave it `false` and configure an allowlist instead.
-
-### SQLite over a network database
-One instance, one file, no operational overhead. SQLite handles the write load of a single-threaded agent trivially. `modernc.org/sqlite` is used (pure Go, no CGO) so the binary cross-compiles cleanly for Linux without extra toolchain dependencies.
-
-### Context in repo, not just in session
-Durable context lives in `CLAUDE.md` (committed, always loaded) and `.claude-context/` (per-task notes written by Claude). Claude Code session transcripts are treated as disposable working memory. This means any session can be reconstructed from disk + GitHub, and a crashed session doesn't lose task knowledge.
-
----
-
-## Installation
-
-### One-command install (recommended)
+### One command
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eslam-mahmoud/go-ai-agent/main/install.sh | bash
 ```
 
 The installer:
-1. Installs Node.js, git, and the `gh` CLI if missing
-2. Installs and authenticates the Claude Code CLI via OAuth
-3. Downloads the pre-built `madar` binary (or builds from source)
-4. **Interactively prompts** for your GitHub token, Telegram bot token, and allowed chat IDs — validating each before saving
-5. Prompts for which repos to watch
-6. Installs and starts a systemd service (Linux) or launchd agent (macOS)
 
-The installer is **idempotent** — re-running it resumes from where it left off using a checkpoint file at `/opt/madar/.install-state`.
+1. Installs git, Node.js, and the `gh` CLI if missing
+2. Installs the Claude Code CLI and walks you through `claude login`
+3. Downloads the pre-built `madar` binary, or builds from source if no release matches your platform
+4. Prompts for your GitHub token and Telegram credentials, **validating each before saving**
+5. Asks which repository to deliver and what the goal is, then creates the project
+6. Installs and starts a service — systemd on Linux, launchd on macOS
 
-**Upgrade to the latest release:**
+Everything lands in `/opt/madar` (override with `MADAR_HOME`). The installer is **idempotent**: re-run it after an interruption and it resumes from a checkpoint at `/opt/madar/.install-state` rather than starting over.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/eslam-mahmoud/go-ai-agent/main/install.sh | bash -s -- --update
-```
-
-Stops the service, downloads the latest binary from GitHub Releases, verifies the sha256 checksum, swaps the binary, and restarts the service. You can also upgrade from within the running agent:
+### From source
 
 ```bash
-/opt/madar/madar -update
-sudo systemctl restart madar
-```
-
-**Update credentials later:**
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/eslam-mahmoud/go-ai-agent/main/install.sh | bash -s -- --update-keys
-```
-
-**Remove the service** (keeps files):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/eslam-mahmoud/go-ai-agent/main/install.sh | bash -s -- --uninstall
-```
-
----
-
-### Manual install (from source)
-
-### Prerequisites
-
-| Dependency | Notes |
-|---|---|
-| **Go 1.25+** | To build from source |
-| **Claude Code CLI** | `npm install -g @anthropic-ai/claude-code` — requires a Claude subscription |
-| **git** | For cloning project workspaces |
-| **gh** (optional) | GitHub CLI, useful for PR creation in later versions |
-
-### Build
-
-```bash
-git clone git@github.com:eslam-mahmoud/go-ai-agent.git
+git clone https://github.com/eslam-mahmoud/go-ai-agent.git
 cd go-ai-agent
 go build -o madar ./cmd/madar/
 ```
 
-The binary is self-contained. Copy it anywhere.
-
-### Set up workspaces
-
-Madar runs Claude Code inside a local clone of each managed repository. Create the workspace directory and clone your repos:
-
-```bash
-mkdir -p workspaces/owner
-git clone git@github.com:owner/your-repo.git workspaces/owner/your-repo
-```
-
-The path convention is `workspaces/<owner>/<repo>` — this is derived automatically from `config.yaml`'s `repos` list and the `workspace_dir` setting.
-
-### Authenticate Claude Code
-
-Claude Code uses your subscription credentials. On the machine that will run Madar:
+Then create `config.yaml` (see [Configuration reference](#configuration-reference)) and `.env` (see [Environment variables](#environment-variables)), and authenticate Claude:
 
 ```bash
 claude login
 ```
 
-Follow the OAuth device flow (authorize in a browser). The credential is stored in `~/.claude` and persists across restarts.
+---
 
-### Create GitHub labels
+## First run
 
-Madar needs four labels on each managed repo. Create them once:
+Madar delivers **one project**. Create it, give it work, and start the daemon.
+
+**1. Create the project.** The installer does this for you; do it manually if you built from source:
 
 ```bash
-for label in "ready:0075ca" "in-progress:e4e669" "awaiting-feedback:d93f0b" "done:0e8a16"; do
-  name="${label%%:*}"; color="${label##*:}"
-  gh label create "$name" --color "$color" --repo owner/your-repo
-done
+madar project create -config config.yaml --repo owner/name --name "My Project" --goal "What done looks like"
+```
+
+**2. Add work.** Either add tasks yourself:
+
+```bash
+madar project add-task -config config.yaml --repo owner/name --title "Add rate limiting" --goal "Requests are capped per client"
+```
+
+…or set `project.auto_initialize: true` and let the Architect propose the first backlog by reading the repository.
+
+**3. Start it.** The installer already did this. To run it yourself:
+
+```bash
+madar -config config.yaml -env .env
+```
+
+**4. Watch it work.** Each tick advances the project exactly one step:
+
+```bash
+madar -config config.yaml -status
 ```
 
 ---
 
-## Environment Variables
+## Checking status
 
-Store these in a `.env` file (never commit it) or export them in your environment. The `.env` file is loaded automatically when you pass `-env .env` to the binary.
+```bash
+madar -config config.yaml -status
+```
+
+```
+madar status
+  schema version : 19
+  db             : /opt/madar/madar.db
+  repo           : owner/name
+  project        : My Project (executing, health on-track)
+  backlog        : 7 task(s)
+    completed        3
+    queued           3
+    developing       1
+  current task   : #4 Add rate limiting (developing)
+    issue        : #128
+    branch       : madar/issue-128
+    pull request : #131
+    last run     : developer completed (engine claude, model default)
+```
+
+`-status` opens the database **read-only** and does not take the daemon lock, so it is safe to run while Madar is working.
+
+For the service itself:
+
+```bash
+systemctl status madar        # Linux
+journalctl -fu madar          # Linux — follow the log
+launchctl list | grep madar   # macOS
+```
+
+If you set up Telegram, `/status` in the chat answers the same question, and Madar keeps one live status message updated in place rather than flooding the channel.
+
+---
+
+## Updating
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eslam-mahmoud/go-ai-agent/main/install.sh | bash -s -- --update
+```
+
+This replaces the binary with the latest release and restarts the service. Your config, credentials, and database are untouched. Database migrations are ordered and applied automatically on the next start.
+
+The binary can also update itself:
+
+```bash
+madar -update
+```
+
+**Rolling back** is a matter of reinstalling an earlier release. Migrations only move forward, so a binary older than your database will refuse to start rather than corrupt it — that refusal is deliberate.
+
+---
+
+## Rotating credentials
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eslam-mahmoud/go-ai-agent/main/install.sh | bash -s -- --update-keys
+```
+
+This re-prompts for the GitHub token and Telegram credentials, validates each against its API before saving, and restarts the service. Nothing else changes.
+
+To edit them by hand instead:
+
+```bash
+$EDITOR /opt/madar/.env
+systemctl restart madar
+```
+
+**The Claude credential is not in `.env`.** It is managed by the Claude Code CLI and lives in `~/.claude`. To rotate it:
+
+```bash
+claude logout && claude login
+```
+
+Note that the service runs as a specific user — authenticate as that same user, or the daemon will not see the new credential.
+
+---
+
+## Uninstalling
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eslam-mahmoud/go-ai-agent/main/install.sh | bash -s -- --uninstall
+```
+
+This stops and removes the service. **It deliberately leaves your data in place**, because the database is the only record of what the agent did:
+
+| Path | What it is |
+|---|---|
+| `/opt/madar/madar` | The binary |
+| `/opt/madar/config.yaml` | Project settings |
+| `/opt/madar/.env` | GitHub and Telegram credentials |
+| `/opt/madar/madar.db` | Project, backlog, and execution history |
+| `/opt/madar/workspaces/` | The cloned repository |
+
+Once you are sure you want none of it:
+
+```bash
+sudo rm -rf /opt/madar
+```
+
+Madar leaves nothing outside `/opt/madar` except the service definition the uninstaller already removed. It does **not** touch `~/.claude` — remove that with `claude logout` if you want the Claude credential gone too.
+
+---
+
+## How it works
+
+Madar owns a project and advances it one step per tick.
+
+```
+            ┌──────────────────────────────────────────┐
+            │            Engineering Manager           │
+            │  reviews the completed task, decides     │
+            │  discoveries, reorders, picks what's next│
+            └────────────────┬─────────────────────────┘
+                             │ selects one task
+                             ▼
+   ┌────────┐   ┌───────────┐   ┌──────────┐   ┌───────┐   ┌──────────┐
+   │Planner │──▶│ Developer │──▶│ Reviewer │──▶│ Fixer │──▶│ Verifier │
+   └────────┘   └───────────┘   └──────────┘   └───────┘   └──────────┘
+     plan          write code      find issues    fix them    prove it works
+                                        │            ▲
+                                        └────────────┘
+                                       only if findings block
+                             │
+                             ▼
+                    task completed ──▶ back to the Manager
+```
+
+Each tick does exactly one thing:
+
+| Project state | What the tick does |
+|---|---|
+| paused | nothing |
+| no backlog | initializes it (`auto_initialize`), otherwise idles |
+| no current task | runs a Manager review to select the next one |
+| task in flight | runs the next delivery mode |
+| task terminal | Manager review: decides discoveries, runs the Architect if needed, publishes, selects what's next |
+| budget exhausted | stops and records `budget.exhausted` |
+
+**Startup order is deliberate: recovery, then reconciliation, then delivery.** Recovery repairs what a crash left half-written *before* reconciliation compares it against GitHub, so a restart never reconciles the wrong thing.
+
+### Discoveries
+
+When a mode notices something outside its task — a bug, a missing test, a security concern — it records a *discovery* rather than acting on it. The Manager decides each one: accept it into the backlog, defer it, or reject it. This is how Madar grows its own backlog without ever losing the thread of the current task.
+
+### What you see
+
+- **The parent issue** on GitHub is a live dashboard: goal, backlog, progress, and the latest Manager review.
+- **`.madar/project.yaml` and `.madar/plan.md`** are written into the repository, so the plan is versioned alongside the code.
+- **One Telegram message**, edited in place, shows what is running right now.
+
+### Mode outputs are durable
+
+Every mode run is recorded, and its output stored under `<workspace_dir>/.madar/executions/`. That is how the Developer reads the Planner's plan and the Fixer reads the Reviewer's findings — across restarts, not just within one run.
+
+---
+
+## Owner commands
+
+With a Telegram bot configured, these are answered in chat:
+
+| Command | What it does |
+|---|---|
+| `/status` | What is running right now |
+| `/project` | Goal, health, and progress |
+| `/plan` | The ordered backlog |
+| `/next` | What the Manager selected and why |
+| `/logs` | Recent workflow events |
+| `/pause` | Stop after the current step |
+| `/resume` | Continue |
+| `/cancel` | Abandon the current task |
+| `/retry` | Re-run the failed step |
+
+Only the Telegram IDs in `TELEGRAM_ALLOWED_IDS` may issue them — **an empty list authorizes nobody**, and Madar does not build the command surface at all rather than presenting one that refuses everything. Commands also expire (`command_max_age`) and are rate limited, with a tighter limit on the ones that change delivery.
+
+---
+
+## Safety
+
+**Sandboxing.** Every mode declares a workspace permission and both provider adapters enforce it: `read-only` for Planner, Reviewer, Manager, and Architect — they cannot write files, edit code, or run commands — and `workspace-write` for Developer, Fixer, and Verifier. An unrecognized value is refused rather than ignored.
+
+**Policy.** An optional `policy:` block adds per-command and per-path rules. They are handed to the provider as tool-permission rules, so a denied command or write is **refused at the moment of the tool call** rather than noticed afterwards, when the file has already been written. Deny always wins, and a denied path is denied to every tool that can write it.
+
+```yaml
+policy:
+  commands:
+    default: ask
+    deny: [git push --force]
+  paths:
+    deny: [.env]        # denied even inside a writable root
+```
+
+Policy rules are enforced on the Claude engine. The Codex CLI has no equivalent permission surface, so a Codex deployment gets the sandbox but not the fine-grained rules.
+
+**Budgets.** `project.budgets` bounds what one task may consume — wall-clock time, review/fix cycles, CI repair attempts, mode retries. They are measured against the immutable execution history, so a restart cannot reset them.
+
+**`skip_permissions`** is the explicit, documented way to opt out of all of it. It is on by default in the installer's config because an autonomous agent that stops to ask cannot run unattended — turn it off if you intend to supervise each run.
+
+---
+
+## CI/CD feedback loop
+
+With `ci.enabled: true`, the Verifier will not accept a task until the GitHub Actions check suite for its branch is green. A red suite sends the task back to the Fixer with the failure output, bounded by `project.budgets.max_ci_fix_cycles`.
+
+```
+Developer pushes madar/issue-N ──▶ opens PR
+                                     │
+                        Madar reads the check suite
+                                     │
+              ┌──────────────────────┼──────────────────────┐
+              │ pending              │ success              │ failure
+              ▼                      ▼                      ▼
+           wait                Verifier accepts       back to Fixer
+                                     │                with the output
+                                     ▼                      │
+                            Manager review          budget exhausted?
+                                                             │
+                                                     stop and report
+```
+
+**Why this is not a shell script.** Something has to wait for an asynchronous CI event, know which task and which provider session the failed PR belongs to, and resume that work with the test output. That requires state surviving across process restarts — which is exactly what the database is for.
+
+Enable it with:
+
+```yaml
+ci:
+  enabled: true
+```
+
+---
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                       Madar (Go binary)                      │
+│                                                              │
+│  ┌──────────────┐   ┌──────────────┐   ┌─────────────────┐  │
+│  │ Project Loop │──▶│ Mode         │──▶│ Engine Adapter  │  │
+│  │ (one step    │   │ Dispatcher   │   │ (claude / codex)│  │
+│  │  per tick)   │   │ + recorder   │   └─────────────────┘  │
+│  └──────┬───────┘   └──────────────┘            │           │
+│         │                                       ▼           │
+│         │           ┌──────────────┐   ┌─────────────────┐  │
+│         ├──────────▶│ Review       │   │ Policy + Budgets│  │
+│         │           │ Coordinator  │   └─────────────────┘  │
+│         │           └──────────────┘                        │
+│         ▼                                                   │
+│  ┌──────────────┐   ┌──────────────┐   ┌─────────────────┐  │
+│  │ Store        │   │ GitHub       │   │ Telegram        │  │
+│  │ (SQLite)     │   │ Client       │   │ Gateway         │  │
+│  └──────────────┘   └──────────────┘   └─────────────────┘  │
+└──────────────────────────────────────────────────────────────┘
+         │                    │
+         ▼                    ▼
+   madar.db            workspaces/owner/repo/   ← the cloned repository
+                       .madar/executions/       ← recorded mode outputs
+```
+
+### Components
+
+| Component | Package | Responsibility |
+|---|---|---|
+| **Project Loop** | `internal/projectloop/` | Advances one project one step per tick; owns the daemon's wiring |
+| **Review Coordinator** | `internal/project/review.go` | Runs the Manager cycle: discoveries, backlog, architecture, selection, publication |
+| **Sequential Workflow** | `internal/workflow/` | Canonical task transitions and the plan → develop → review → fix → verify chain |
+| **Delivery Modes** | `internal/mode/` | Planner, Developer, Reviewer, Fixer, Verifier, Manager, Architect, and their output schemas |
+| **Engine Kernel** | `internal/engine/` | Provider-neutral contracts, registry, JSON Schema validation, error taxonomy |
+| **Claude Adapter** | `internal/engine/claude/` | Spawn `claude`, parse `stream-json`, enforce sandbox and policy |
+| **Codex Adapter** | `internal/engine/codex/` | Run `codex exec`/`resume`, parse JSONL, enforce sandbox |
+| **Execution Recorder** | `internal/execution/` | Makes mode outputs durable so later modes can read earlier ones |
+| **Project Domain** | `internal/domain/` | Project, task, execution, artifact, discovery, and review records |
+| **Store** | `internal/store/` | Ordered SQLite migrations and transactional persistence |
+| **Policy** | `internal/policy/` | Safety rules and per-task budgets |
+| **Commands** | `internal/command/` | Owner command surface with authorization, expiry, and rate limiting |
+| **Workspace** | `internal/workspace/` | Clones and refreshes the repository every mode runs in |
+| **GitHub Client** | `internal/github/` | Issues, comments, labels, pull requests, check suites |
+| **Telegram Gateway** | `internal/telegram/` | Notifications, live status, and inbound commands |
+
+### Task state machine
+
+```
+proposed → queued → selected → planning → developing → reviewing
+                                                           │
+                                    ┌──────────────────────┤
+                                    ▼                      ▼
+                                 fixing              verifying
+                                    │                      │
+                                    └──────────────────────┤
+                                                           ▼
+                                                       completed
+                                                           │
+                                                    Manager review
+                                                           │
+                                              ┌────────────┴────────────┐
+                                              ▼                         ▼
+                                        accepted (closed)         back to queued
+```
+
+Public task state is mirrored onto GitHub issue labels; the database additionally holds the states used during restart recovery. Both are updated together — neither is the sole source of truth on its own.
+
+---
+
+## Design decisions
+
+### Supervise, don't reimplement
+Madar does not talk to the Claude API. It drives the Claude Code CLI, which already handles tool use, context, and sessions. Madar supplies what a CLI cannot: durable state, sequencing, and the decision about what to do next.
+
+### One task at a time
+Sequential delivery is the point, not a limitation. A single active task means the state is small enough to reason about, restarts are safe, and every decision has one clear cause.
+
+### Modes over prompts
+Each stage is a mode with a declared contract and a JSON output schema validated locally. A mode that returns malformed output fails at the boundary rather than corrupting the next stage.
+
+### Provider-neutral by construction
+Claude and Codex sit behind the same interface. A mode declares what it needs; the adapter translates. That is what let the sandbox bug be found — the two adapters disagreed about the same declaration.
+
+### Polling over webhooks
+No public endpoint, no inbound firewall rule, no webhook secret to rotate. Madar reaches out; nothing reaches in.
+
+### SQLite, single writer
+`SetMaxOpenConns(1)`. Every state change is a transaction against one connection. No connection pool means no lost update, and pure-Go SQLite means no CGO and a binary that cross-compiles cleanly.
+
+### The plan lives in the repository
+`.madar/project.yaml` and `.madar/plan.md` are versioned with the code, so the plan is reviewable in a pull request rather than trapped in a database.
+
+### Safety outside the model
+A model may propose anything. Sandbox and policy decide what is allowed, and they are enforced by the process that makes the tool calls — not by asking the model to behave.
+
+---
+
+## Environment variables
+
+Secrets live in `.env`, never in `config.yaml`. **Never commit `.env`** — it is gitignored.
 
 | Variable | Required | Description |
 |---|---|---|
-| `GITHUB_TOKEN` | **Yes** | Personal access token with `repo` scope (read issues, write comments, manage labels). Create at [github.com/settings/tokens](https://github.com/settings/tokens). |
-| `TELEGRAM_BOT_TOKEN` | **Yes** | Bot token from [@BotFather](https://t.me/botfather). Used to send clarification and completion notifications. |
-| `TELEGRAM_ALLOWED_IDS` | **Yes** | Comma-separated list of Telegram chat/user IDs that will receive notifications. Get yours by messaging [@userinfobot](https://t.me/userinfobot). |
-
-Example `.env`:
+| `GITHUB_TOKEN` | **Yes** | Personal access token with `repo` scope: read and write issues, comments, labels, branches, and pull requests. Create at [github.com/settings/tokens](https://github.com/settings/tokens). |
+| `TELEGRAM_BOT_TOKEN` | No | Bot token from [@BotFather](https://t.me/botfather). Without it, Madar delivers silently — no notifications, no live status, no owner commands. |
+| `TELEGRAM_ALLOWED_IDS` | No | Comma-separated Telegram user IDs permitted to receive notifications and issue commands. Get yours from [@userinfobot](https://t.me/userinfobot). **An empty list authorizes nobody.** |
 
 ```
 GITHUB_TOKEN=ghp_...
 TELEGRAM_BOT_TOKEN=123456:ABC-...
-TELEGRAM_ALLOWED_IDS=123456789,987654321
+TELEGRAM_ALLOWED_IDS=123456789
 ```
 
-The Claude subscription credential is **not** stored here — it is managed by `claude login` and lives in `~/.claude`.
+The Claude credential is **not** here. It is managed by `claude login` and lives in `~/.claude`.
+
+The GitHub token is injected into git through the process environment — it is never written to `.git/config` and never appears in a command line or process listing.
 
 ---
 
-## Configuration Reference
+## Configuration reference
 
-`config.yaml` controls agent behaviour. Safe to commit (contains no secrets).
+`config.yaml` controls behaviour and contains no secrets, so it is safe to commit.
 
 ```yaml
-# How often to poll GitHub for new work (seconds)
-poll_interval_seconds: 45
-
-# Concurrency — v1 is single-threaded
-concurrency:
-  enabled: false       # set true to allow parallel tasks
-  max_parallel: 1      # raise when workspace isolation is in place
-
-# GitHub Issue label names (must match what's on the repo)
-labels:
-  ready: ready
-  in_progress: in-progress
-  awaiting_feedback: awaiting-feedback
-  done: done
-
-# Repositories to watch (owner/repo format)
-repos:
-  - owner/project-a
-  - owner/project-b
-
-# Directory name inside each repo where Claude writes context files
-context_dir: .claude-context
-
-claude:
-  bin: ""                      # path to claude CLI; empty = find "claude" on PATH
-  model: ""                    # optional model pinned when an execution starts
-  output_format: stream-json   # always stream-json (required for session IDs)
-  max_turns: 40                # cap agentic turns per invocation; overflow = error
-  run_timeout: 30m             # kill the claude process after this wall time
-  auto_compact: false          # Madar manages context via handoff files + session rotation
-  context_reset_threshold: 0.6 # fraction of model context window at which to rotate session
-  skip_permissions: true       # --dangerously-skip-permissions (required for headless operation)
-  max_thread_chars: 8000       # max chars of human thread in first-run prompt (oldest dropped first)
-  max_issue_body_chars: 4000   # max chars of issue body in first-run prompt
-
-# CI/CD feedback loop — watch check suites and auto-retry on failure
-ci:
-  enabled: false       # set true to enable
-  max_retries: 3       # re-invoke Claude up to N times on CI failure
-  poll_interval: 30s   # how often to poll check suite status
-  wait_timeout: 20m    # give up waiting for CI after this wall time
-
-# Periodic database housekeeping
-cleanup:
-  interval: 24h              # how often to run pruning
-  audit_log_retention: 720h  # delete audit entries older than 30 days
-  task_retention: 2160h      # delete done tasks older than 90 days
-
-# v2: GitHub reconciliation. The daemon reconciles once at startup, before it
-# picks up work, so a restart repairs drift rather than building on it.
-reconcile:
-  interval: 15m        # how often to reconcile; 0 runs only the startup pass
-  on_startup: true     # reconcile before picking up work
-
-# v2: the delivery cycle. Off by default — an upgrade changes nothing until
-# this block enables it, and the project must already exist in the database.
+# The repository this daemon delivers. One project per daemon.
+# Required — Madar will not start without it.
 project:
-  enabled: false          # opt in to v2 project mode
-  repo: owner/name        # required when enabled
-  auto_initialize: false  # let the Architect create the first backlog
-  interval: 30s           # one delivery step per tick
-  budgets:                # every zero means unlimited
+  repo: owner/name
+  # Let the Architect propose the first backlog when none exists.
+  auto_initialize: false
+  # How often to advance the project by one step.
+  interval: 30s
+  # Bounds on one task. Every zero means unlimited.
+  budgets:
     max_task_duration: 0s
     max_review_fix_cycles: 0
     max_ci_fix_cycles: 0
     max_mode_retries: 0
 
-# v2: safety policy, handed to the provider as tool-permission rules so a
-# denied command or write is refused at the tool call. Absent = unconstrained.
-# Enforced on the Claude engine only; Codex has no equivalent surface.
+claude:
+  bin: ""                      # path to the claude binary; empty = find on PATH
+  model: ""                    # empty = provider default
+  output_format: stream-json
+  max_turns: 40
+  run_timeout: 30m
+  auto_compact: false
+  context_reset_threshold: 0.6
+  skip_permissions: true       # explicit opt-out of the sandbox
+
+# Require a green check suite before the Verifier accepts a task.
+ci:
+  enabled: false
+  max_retries: 3
+  poll_interval: 30s
+  wait_timeout: 20m
+
+# Periodic database housekeeping.
+cleanup:
+  interval: 24h
+  audit_log_retention: 720h    # 30 days
+  task_retention: 2160h        # 90 days
+
+# Repair drift against GitHub once at startup, then on this interval.
+# Set interval to 0 to run only the startup pass.
+reconcile:
+  interval: 15m
+  on_startup: true
+
+# Safety rules handed to the provider, so a denied command or write is
+# refused at the tool call. Absent = unconstrained.
+# Enforced on the Claude engine; Codex has no equivalent surface.
 policy:
   commands:
-    default: ask         # allow | ask | deny when nothing matches
+    default: ask               # allow | ask | deny when nothing matches
     allow: []
     deny: []
   paths:
     writable: []
-    deny: []             # denied even inside a writable root
+    deny: []                   # denied even inside a writable root
   require_approval: []
 
-# v2: bounds on owner commands, applied on top of TELEGRAM_ALLOWED_IDS.
-# Only the configured IDs may issue commands at all.
+# Bounds on owner commands, on top of TELEGRAM_ALLOWED_IDS.
 telegram:
   command_max_age: 10m         # refuse commands older than this
-  rate_window: 1m              # sliding window for rate limiting
-  max_commands_per_window: 20  # read-only commands per sender per window
-  max_control_per_window: 5    # control commands: tighter, since they change delivery
+  rate_window: 1m
+  max_commands_per_window: 20
+  max_control_per_window: 5    # tighter: these change delivery
 
-# Local paths
 db_path: /opt/madar/madar.db
 workspace_dir: /opt/madar/workspaces
 ```
 
----
+### Keys removed with v1 issue mode
 
-## GitHub Issue Workflow
+Madar refuses to start on a config containing these, naming the replacement rather than ignoring the key — silence would leave you believing work was queued.
 
-### Creating a task
-
-1. Open an issue in any repo listed under `repos:`.
-2. Write a clear title and description — this is the prompt Claude receives.
-3. Apply the `ready` label.
-
-Madar picks it up on the next poll.
-
-### Label lifecycle
-
-| Label | Meaning |
+| Removed | Replacement |
 |---|---|
-| `ready` | Waiting to be picked up |
-| `in-progress` | Claude is actively working |
-| `awaiting-feedback` | Claude posted a question; waiting for your reply |
-| `done` | Task completed |
-
-Transitions happen automatically. You only ever set `ready` manually.
-
-### Replying to a clarification
-
-When Madar needs input, it posts a comment like:
-
-> 🤔 **Madar needs your input before continuing:**
-> Should I use per-IP or per-user rate limiting?
-
-And you receive a Telegram message with a direct link to that comment.
-
-Reply in a **new comment** on the same issue. Madar detects comments posted after its question, resumes the Claude session with your reply, and continues.
+| `repos` | `project.repo` — one managed project per daemon |
+| `labels` | Removed. Task state lives in the database, not in issue labels |
+| `concurrency` | Removed. Delivery is sequential by design |
+| `poll_interval_seconds` | `project.interval` |
+| `context_dir` | Removed. Modes read the project's own `.madar/` documents |
 
 ---
 
-## Running Madar
+## CLI reference
 
-### Locally (development / testing)
+### Daemon flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `-config` | `config.yaml` | Path to the YAML configuration file |
+| `-env` | `.env` | Path to the `.env` file; skipped if it does not exist |
+| `-log-level` | `info` | `debug`, `info`, `warn`, or `error` |
+| `-status` | — | Print project status and exit. Opens the database read-only and does not take the daemon lock, so it is safe while Madar is running |
+| `-version` | — | Print version, commit, and build date, then exit |
+| `-update` | — | Download the latest release, replace the running binary, and exit |
+
+### Project commands
+
+These work directly against the configured SQLite database. Pass `-config` and `-env` after the subcommand when using non-default paths.
+
+```bash
+# Register the project this daemon delivers.
+madar project create \
+  --repo owner/repository \
+  --name "Project name" \
+  --goal "Ship the next release" \
+  --scope "In-scope behaviour and constraints" \
+  --release-target v2.0.0 \
+  --parent-issue 123
+
+# Inspect.
+madar project list
+madar project show --repo owner/repository
+madar project list-tasks --repo owner/repository
+
+# Append work to the ordered backlog.
+madar project add-task \
+  --repo owner/repository \
+  --title "Implement the workflow" \
+  --goal "Run one task from planning through delivery" \
+  --priority 10 \
+  --type feature \
+  --blocks-release
+
+# Write .madar/project.yaml and .madar/plan.md into the workspace.
+madar project sync-files --repo owner/repository
+
+# Create or update the parent dashboard issue on GitHub.
+madar project sync-issue --repo owner/repository
+
+# Compare database state against GitHub and report drift.
+madar project reconcile --repo owner/repository
+```
+
+`sync-files` is deterministic: equal database state produces byte-identical files, with no generation timestamp, so a diff means something actually changed.
+
+`sync-issue` owns only the content between its hidden `madar:project-dashboard` markers. Anything you write outside them is preserved exactly.
+
+### Migrating from v1
+
+If you have a database from a v1 installation, convert one repository into a project:
+
+```bash
+madar migrate-project --repo owner/repository
+```
+
+`--name`, `--goal`, `--scope`, `--release-target`, and `--parent-issue` override the defaults. The conversion copies issue, PR, branch, provider-session, and state history in one transaction. Repeating it is safe and reports already-mapped rows. The legacy tables are left readable — they are the only record of what v1 did.
+
+### Running it yourself
 
 ```bash
 set -a && source .env && set +a
 ./madar -config config.yaml -env .env -log-level debug
 ```
 
-### As a systemd service (EC2 / production)
-
-Create `/etc/systemd/system/madar.service`:
+The installer sets up a service for you. To write the unit by hand:
 
 ```ini
+# /etc/systemd/system/madar.service
 [Unit]
 Description=Madar autonomous coding agent
 After=network.target
@@ -662,7 +653,7 @@ EnvironmentFile=/opt/madar/.env
 ExecStart=/opt/madar/madar -config /opt/madar/config.yaml -log-level info
 Restart=on-failure
 RestartSec=10s
-# Allow 120s for graceful shutdown: 30s for cleanup context + buffer for systemd
+# Graceful shutdown needs room for the cleanup context to finish.
 TimeoutStopSec=120
 
 [Install]
@@ -672,173 +663,99 @@ WantedBy=multi-user.target
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now madar
-sudo journalctl -fu madar   # follow logs
+sudo journalctl -fu madar
 ```
-
-### Flags
-
-| Flag | Default | Description |
-|---|---|---|
-| `-config` | `config.yaml` | Path to the YAML configuration file |
-| `-env` | `.env` | Path to the .env file (skipped if the file doesn't exist) |
-| `-log-level` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
-| `-version` | — | Print version, commit, and build date then exit |
-| `-status` | — | Print active, interrupted, recovering, CI-watching, and awaiting-feedback tasks then exit |
-| `-update` | — | Check for a newer release, download it, and replace the running binary then exit |
-
-### Project commands
-
-Project commands manage the v2 project aggregate directly in the configured
-SQLite database. They do not require a GitHub token or an installed engine CLI.
-Pass `--config` and `--env` after the subcommand when using non-default paths.
-
-```bash
-# Register a repository.
-madar project create \
-  --repo owner/repository \
-  --name "Project name" \
-  --goal "Ship the next release" \
-  --scope "In-scope behavior and constraints" \
-  --release-target v2.0.0 \
-  --parent-issue 123
-
-# Inspect registered projects and one project's complete state.
-madar project list
-madar project show --repo owner/repository
-
-# Append work to the ordered backlog and inspect it.
-madar project add-task \
-  --repo owner/repository \
-  --title "Implement the workflow" \
-  --goal "Run one project task from planning through delivery" \
-  --priority 10 \
-  --type feature \
-  --blocks-release
-madar project list-tasks --repo owner/repository
-
-# Materialize the durable snapshot in the configured repository workspace.
-madar project sync-files --repo owner/repository
-
-# Create or update the human-facing GitHub dashboard issue.
-GITHUB_TOKEN=github_pat_... madar project sync-issue --repo owner/repository
-```
-
-The sync command atomically writes `.madar/project.yaml` and
-`.madar/plan.md`. Equal database state produces byte-identical files; the
-generated files contain no wall-clock generation timestamp.
-
-`sync-issue` creates a parent issue when the project has no linked issue, or
-updates the linked issue otherwise. Madar owns only the content between the
-hidden `madar:project-dashboard` markers; text outside those markers is
-preserved exactly.
-
-### Migrating legacy issue mode
-
-The legacy task table remains intact during the v2 transition. Convert one
-repository into a v2 project with:
-
-```bash
-madar migrate-project --repo owner/repository
-```
-
-Optional `--name`, `--goal`, `--scope`, `--release-target`, and
-`--parent-issue` flags override the migration defaults. The conversion copies
-legacy issue, PR, branch, provider-session, and state history in one
-transaction. Repeating the command is safe and reports already-mapped rows.
-The legacy records remain readable and the existing daemon workflow continues
-to operate during the compatibility period.
 
 ---
 
-## Project Structure
+## Project structure
 
 ```
 .
-├── cmd/
-│   └── madar/
-│       └── main.go              # Binary entrypoint
+├── cmd/madar/main.go            # Entrypoint: wiring, flags, startup order
 ├── internal/
-│   ├── app/
-│   │   └── lock.go              # Single-daemon lifecycle lock
-│   ├── config/
-│   │   ├── config.go            # Config loading (YAML + .env)
-│   │   └── config_test.go
-│   ├── engine/
-│   │   ├── engine.go            # Provider-neutral execution contract
-│   │   └── errors.go            # Stable provider error taxonomy
-│   ├── store/
-│   │   ├── store.go             # SQLite task/session store
-│   │   └── store_test.go
-│   ├── github/
-│   │   ├── client.go            # GitHub Issues API client
-│   │   ├── client_test.go
-│   │   └── checks.go            # GitHub Actions check suite polling
-│   ├── claude/
-│   │   ├── runner.go            # claude CLI wrapper + stream-json parser
-│   │   └── runner_test.go
-│   ├── telegram/
-│   │   ├── gateway.go           # Telegram Bot API notifications
-│   │   └── gateway_test.go
-│   ├── domain/                  # v2 project, task, execution, discovery types
-│   ├── workflow/                # v2 state machine and sequential delivery
-│   ├── mode/                    # v2 delivery modes and output schemas
-│   ├── project/                 # v2 controllers: selection, review, backlog,
+│   ├── app/                     # Single-daemon instance lock
+│   ├── config/                  # config.yaml + .env loading and validation
+│   ├── domain/                  # Project, task, execution, discovery, review
+│   ├── engine/                  # Provider-neutral contract, registry, errors
+│   │   ├── claude/              # Claude CLI adapter, stream-json, sandbox
+│   │   └── codex/               # Codex CLI adapter, JSONL, sandbox
+│   ├── execution/               # Records mode runs and stores their output
+│   ├── mode/                    # Planner, Developer, Reviewer, Fixer,
+│   │                            #   Verifier, Manager, Architect + schemas
+│   ├── workflow/                # Task state machine and delivery sequence
+│   ├── project/                 # Controllers: selection, review, backlog,
 │   │                            #   discoveries, architecture, reconciliation
-│   ├── policy/                  # v2 safety policy, budgets, and metrics
-│   ├── notify/                  # v2 notification router and live status
-│   ├── command/                 # v2 owner commands and authorization
-│   ├── reposcan/                # v2 read-only repository inspection
-│   ├── architecturedocs/        # v2 AGENTS.md and architecture generation
-│   ├── githubops/               # v2 idempotent GitHub operations
-│   ├── e2e/                     # v2 deterministic end-to-end fixtures
-│   └── orchestrator/
-│       ├── loop.go              # Main poll loop + task state machine
-│       ├── loop_test.go
-│       ├── ci.go                # CI/CD feedback loop state machine
-│       ├── ci_test.go
-│       ├── workspace.go         # Auto-clone workspace repos on startup
-│       └── workspace_test.go
-├── config.yaml                  # Agent behaviour (safe to commit)
+│   ├── projectloop/             # The delivery loop and the daemon's wiring
+│   ├── projectcli/              # madar project subcommands
+│   ├── projectfiles/            # .madar/project.yaml and plan.md
+│   ├── projectissue/            # Parent dashboard issue rendering
+│   ├── policy/                  # Safety rules and per-task budgets
+│   ├── command/                 # Owner commands, authorization, rate limits
+│   ├── notify/                  # Notification router and live status message
+│   ├── store/                   # Ordered SQLite migrations and persistence
+│   ├── github/                  # Issues, PRs, labels, check suites
+│   ├── githubops/               # Idempotent GitHub operations
+│   ├── telegram/                # Bot API: notifications and inbound commands
+│   ├── workspace/               # Clones and refreshes the repository
+│   ├── reposcan/                # Read-only repository inspection
+│   ├── architecturedocs/        # AGENTS.md and architecture generation
+│   ├── updater/                 # Self-update from GitHub releases
+│   └── e2e/                     # End-to-end fixtures with only the provider
+│                                #   and GitHub faked
+├── config.yaml                  # Behaviour — safe to commit
 ├── .env                         # Secrets — never commit
-└── workspaces/                  # Cloned repos — never commit
-    └── owner/
-        └── repo/
+└── workspaces/                  # Cloned repository — never commit
+    └── owner/repo/
+        └── .madar/executions/   # Recorded mode outputs
+```
+
+### Building and testing
+
+```bash
+go build -o madar ./cmd/madar/
+go test ./...
+go test -race ./...
+```
+
+Tests use hand-rolled fakes rather than a mock framework, and require no network. `internal/e2e` drives the real store, controllers, and workflow with only the provider and GitHub faked — it fails when a stage is *skipped*, not only when a stage is wrong.
 
 ---
 
 ## Troubleshooting
 
+### `project.repo is required to run the daemon`
+Madar delivers one project and cannot start without knowing which. Set `project.repo` in `config.yaml`, then create the project:
+
+```bash
+madar project create -config config.yaml --repo owner/name --name "Name" --goal "Goal"
+```
+
+### `config uses keys removed with v1 issue mode`
+Your config predates the removal of issue mode. The error names each stale key and its replacement — see [keys removed with v1 issue mode](#keys-removed-with-v1-issue-mode).
+
+### `no v2 project exists for "owner/name"`
+The config names a repository that has no project row. Create it with `madar project create`, or check for a typo against `madar project list`.
+
 ### `claude binary not found`
-Install Claude Code: `npm install -g @anthropic-ai/claude-code`, then `claude login`. If installed to a non-standard path, set `claude.bin:` in `config.yaml`.
+Install it with `npm install -g @anthropic-ai/claude-code`, then `claude login`. If it lives somewhere unusual, set `claude.bin` in `config.yaml`.
 
 ### `GITHUB_TOKEN is required`
-Add `GITHUB_TOKEN=ghp_...` to your `.env` file. The token needs `repo` scope.
+Add `GITHUB_TOKEN=ghp_...` to `.env`. It needs `repo` scope.
 
-### Issues not being picked up
-Check that the `ready` label name in `config.yaml` exactly matches what's on the GitHub repo (case-sensitive). Run `madar -status` to see what the agent is currently watching.
+### Nothing is happening
+Run `madar -status`. Common causes, in the order worth checking:
 
-### Task stuck `in-progress`
-On startup, Madar automatically marks unfinished provider executions
-`interrupted`, transitions them to `recovering`, and resumes their stored
-session. The GitHub issue remains labelled `in-progress`. Run `madar -status`
-to inspect recovery state. Human input is requested only when durable recovery
-information such as the provider session ID is missing.
+- **The backlog is empty.** Add a task, or set `project.auto_initialize: true`.
+- **The project is paused.** `/resume` in Telegram, or check `madar project show`.
+- **A budget is exhausted.** The log records `budget.exhausted` with the reason.
+- **An architecture risk is open.** Task selection is deliberately blocked until the Manager resolves it.
 
-### Workspace clone failing (private repo)
-Ensure `GITHUB_TOKEN` has `repo` scope. Madar uses authenticated HTTPS (`x-access-token` via environment variables — the token is never written to `.git/config`).
+### Workspace clone failing on a private repository
+`GITHUB_TOKEN` needs `repo` scope. Madar authenticates over HTTPS with the token supplied through git's environment configuration — it is never written to `.git/config`.
 
-### Database locked errors
-Daemon mode acquires `<db_path>.lock` before opening SQLite. A second daemon
-fails immediately and reports the PID recorded by the lock owner. Check that
-process with `ps -p <pid>`; do not delete the lock file while it is running.
-The file intentionally remains after shutdown and is reusable—the OS advisory
-lock, not file existence, determines ownership. `madar -status` opens SQLite
-read-only and remains available while the daemon is running.
+### `database locked`
+The daemon takes `<db_path>.lock` before opening SQLite. A second daemon fails immediately and reports the PID of the lock holder. Check it with `ps -p <pid>`; do not delete the lock file while that process is alive. The file remaining after shutdown is normal — an OS advisory lock, not the file's existence, determines ownership. `madar -status` opens the database read-only and works while the daemon runs.
 
-### Check agent status
-```bash
-./madar -config config.yaml -status
-```
-Prints schema version, active, interrupted, recovering, awaiting-feedback, and
-CI-watching tasks.
-```
+### A task is stuck mid-delivery
+On startup Madar marks unfinished executions interrupted and re-derives what to do. `madar -status` shows the current task and its last run. If a provider session ID was lost, Madar asks rather than guessing.

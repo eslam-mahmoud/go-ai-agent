@@ -40,6 +40,7 @@ const (
 	WorkflowTaskIssueFiled             WorkflowEventType = "task.issue-filed"
 	WorkflowTaskPullRequestFound       WorkflowEventType = "task.pull-request-found"
 	WorkflowOwnerCommand               WorkflowEventType = "owner.command"
+	WorkflowBudgetExhausted            WorkflowEventType = "budget.exhausted"
 )
 
 var ErrInvalidWorkflowEvent = errors.New("invalid workflow event")

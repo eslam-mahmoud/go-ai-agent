@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/eslam-mahmoud/go-ai-agent/internal/architecturedocs"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/domain"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/store"
 )
@@ -29,6 +30,8 @@ type ArchitectureAssessment struct {
 	Discoveries      []*domain.Discovery
 	Reason           string
 	Recorded         bool
+	// Documents reports what an Architect run wrote to the repository.
+	Documents *architecturedocs.Result
 }
 
 // ArchitectRunner is the provider-neutral boundary to Architect mode. It
@@ -44,9 +47,20 @@ type ArchitectRunner interface {
 // ArchitectureController raises the architecture-review obligation and, when
 // an Architect runner is configured, satisfies it. It never edits
 // architecture itself; the run proposes and later items apply.
+// ArchitectureDocumentWriter turns a validated proposal into repository
+// documents. It is optional: a deployment may run architecture assessment
+// without generating files.
+type ArchitectureDocumentWriter interface {
+	WriteArchitectureDocuments(
+		projectID int64,
+		proposal json.RawMessage,
+	) (*architecturedocs.Result, error)
+}
+
 type ArchitectureController struct {
 	store     ArchitectureStore
 	architect ArchitectRunner
+	documents ArchitectureDocumentWriter
 }
 
 func NewArchitectureController(
@@ -61,10 +75,24 @@ func NewArchitectureControllerWithRunner(
 	architectureStore ArchitectureStore,
 	architect ArchitectRunner,
 ) (*ArchitectureController, error) {
+	return NewArchitectureControllerWithDocuments(architectureStore, architect, nil)
+}
+
+// NewArchitectureControllerWithDocuments also writes the proposal to the
+// repository once a run completes.
+func NewArchitectureControllerWithDocuments(
+	architectureStore ArchitectureStore,
+	architect ArchitectRunner,
+	documents ArchitectureDocumentWriter,
+) (*ArchitectureController, error) {
 	if architectureStore == nil {
 		return nil, errors.New("architecture controller store is required")
 	}
-	return &ArchitectureController{store: architectureStore, architect: architect}, nil
+	return &ArchitectureController{
+		store:     architectureStore,
+		architect: architect,
+		documents: documents,
+	}, nil
 }
 
 // RunArchitect satisfies an outstanding obligation by running Architect mode
@@ -88,6 +116,13 @@ func (controller *ArchitectureController) RunArchitect(
 	proposal, err := controller.architect.RunArchitect(ctx, projectID, ids)
 	if err != nil {
 		return nil, nil, fmt.Errorf("run architect: %w", err)
+	}
+	if controller.documents != nil && len(proposal) > 0 {
+		written, err := controller.documents.WriteArchitectureDocuments(projectID, proposal)
+		if err != nil {
+			return nil, nil, fmt.Errorf("write architecture documents: %w", err)
+		}
+		assessment.Documents = written
 	}
 	return assessment, proposal, nil
 }

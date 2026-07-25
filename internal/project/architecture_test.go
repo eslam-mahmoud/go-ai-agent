@@ -6,6 +6,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/eslam-mahmoud/go-ai-agent/internal/architecturedocs"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/domain"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/store"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/workflow"
@@ -335,4 +336,70 @@ func (fake *fakeArchitectRunner) RunArchitect(
 		return nil, fake.err
 	}
 	return fake.output, nil
+}
+
+func TestArchitectRunWritesArchitectureDocuments(t *testing.T) {
+	t.Parallel()
+	fixture := newReviewFixture(t)
+	fixture.architectureRiskDiscovery(t, "Cross-cutting cache change")
+	proposal := `{"status":"completed","architecture_summary":"One writer.",
+		"components":[{"name":"store","responsibility":"Own durable state."}],
+		"decisions":[{"title":"Single writer","decision":"Serialize writes.","rationale":"Avoids contention."}]}`
+	writer := &fakeDocumentWriter{}
+	controller, err := NewArchitectureControllerWithDocuments(
+		fixture.store,
+		&fakeArchitectRunner{output: []byte(proposal)},
+		writer,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assessment, raw, err := controller.RunArchitect(context.Background(), fixture.projectID)
+	if err != nil {
+		t.Fatalf("RunArchitect: %v", err)
+	}
+	if len(raw) == 0 || writer.calls != 1 {
+		t.Fatalf("writer calls = %d", writer.calls)
+	}
+	if assessment.Documents == nil || len(assessment.Documents.Written) != 1 {
+		t.Fatalf("documents = %#v", assessment.Documents)
+	}
+}
+
+func TestArchitectRunSurfacesDocumentFailures(t *testing.T) {
+	t.Parallel()
+	fixture := newReviewFixture(t)
+	fixture.architectureRiskDiscovery(t, "Cross-cutting cache change")
+	controller, err := NewArchitectureControllerWithDocuments(
+		fixture.store,
+		&fakeArchitectRunner{output: []byte(`{"status":"completed"}`)},
+		&fakeDocumentWriter{err: errors.New("disk is full")},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := controller.RunArchitect(
+		context.Background(), fixture.projectID,
+	); err == nil {
+		t.Fatal("document failure reported success")
+	}
+}
+
+type fakeDocumentWriter struct {
+	calls int
+	err   error
+}
+
+func (fake *fakeDocumentWriter) WriteArchitectureDocuments(
+	_ int64,
+	proposal json.RawMessage,
+) (*architecturedocs.Result, error) {
+	fake.calls++
+	if fake.err != nil {
+		return nil, fake.err
+	}
+	if len(proposal) == 0 {
+		return nil, errors.New("empty proposal")
+	}
+	return &architecturedocs.Result{Written: []string{"AGENTS.md"}}, nil
 }

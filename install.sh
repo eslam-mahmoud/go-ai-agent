@@ -393,60 +393,60 @@ configure_credentials() {
 }
 
 # ── step: config ──────────────────────────────────────────────────────────────
-configure_repos() {
-    if [[ "$(step_status repos)" == "done" ]] && [[ -f "$CONFIG_PATH" ]]; then
+configure_project() {
+    if [[ "$(step_status project)" == "done" ]] && [[ -f "$CONFIG_PATH" ]]; then
         success "Config already exists (skipping — use --update-keys to edit credentials)"
         return
     fi
 
     echo ""
     bold "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    bold " Configure repositories"
+    bold " Configure the project"
     bold "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
-    echo "  Which GitHub repos should Madar watch for issues?"
-    echo "  Format: owner/repo (one per line, empty line to finish)"
+    echo "  Madar delivers one project at a time — one goal, one task,"
+    echo "  one branch, one pull request. Which repository is it?"
     echo ""
-    local repos=()
-    while true; do
-        local repo_input
-        read -rp "  Repo (or Enter to finish): " repo_input
-        [[ -z "$repo_input" ]] && break
-        # Normalise: strip https://github.com/ prefix and trailing slashes
-        repo_input=$(echo "$repo_input" \
-            | sed 's|https://github\.com/||; s|http://github\.com/||; s|github\.com/||; s|/$||')
-        if [[ "$repo_input" != */* ]]; then
-            warn "Expected format: owner/repo — got '$repo_input'. Skipping."
-            continue
+
+    local repo=""
+    while [[ -z "$repo" ]]; do
+        read -rp "  Repository (owner/name): " repo
+        # Accept a pasted URL as readily as owner/name.
+        repo=$(echo "$repo" \
+            | sed 's|https://github\.com/||; s|http://github\.com/||; s|github\.com/||; s|/$||; s|\.git$||')
+        if [[ "$repo" != */* ]]; then
+            warn "Expected owner/name — got '$repo'."
+            repo=""
         fi
-        repos+=("$repo_input")
     done
 
-    # Build repos yaml block
-    local repos_yaml=""
-    for r in "${repos[@]}"; do
-        repos_yaml+="  - $r"$'\n'
-    done
-    [[ -z "$repos_yaml" ]] && repos_yaml="  # - owner/project-a"$'\n'
+    local project_name
+    read -rp "  Project name [${repo##*/}]: " project_name
+    project_name="${project_name:-${repo##*/}}"
 
-    # Write config.yaml
-    mkdir -p "$MADAR_HOME/workspaces"  # workspaces subdir is always safe (user-owned)
+    echo ""
+    echo "  What does 'done' look like? Madar's manager reviews progress"
+    echo "  against this goal after every task."
+    local project_goal=""
+    while [[ -z "$project_goal" ]]; do
+        read -rp "  Goal: " project_goal
+    done
+
+    mkdir -p "$MADAR_HOME/workspaces"
     cat > "$CONFIG_PATH" <<EOF
-poll_interval_seconds: 45
-
-concurrency:
-  enabled: false
-  max_parallel: 1
-
-labels:
-  ready: ready
-  in_progress: in-progress
-  awaiting_feedback: awaiting-feedback
-  done: done
-
-repos:
-${repos_yaml}
-context_dir: .claude-context
+# The repository this daemon delivers. One project per daemon.
+project:
+  repo: $repo
+  # Let the Architect propose the first backlog when none exists.
+  auto_initialize: false
+  # How often to advance the project by one step.
+  interval: 30s
+  # Bounds on one task. Every zero means unlimited.
+  budgets:
+    max_task_duration: 0s
+    max_review_fix_cycles: 0
+    max_ci_fix_cycles: 0
+    max_mode_retries: 0
 
 claude:
   bin: ""
@@ -456,9 +456,8 @@ claude:
   auto_compact: false
   context_reset_threshold: 0.6
   skip_permissions: true
-  max_thread_chars: 8000
-  max_issue_body_chars: 4000
 
+# Watch the GitHub Actions check suite before accepting a task.
 ci:
   enabled: false
   max_retries: 3
@@ -470,13 +469,25 @@ cleanup:
   audit_log_retention: 720h
   task_retention: 2160h
 
-# v2: GitHub reconciliation. Runs once at startup and then on this interval.
+# Repair drift against GitHub once at startup, then on this interval.
 # Set interval to 0 to run only the startup pass.
 reconcile:
   interval: 15m
   on_startup: true
 
-# v2: bounds on owner commands. Only the Telegram IDs in TELEGRAM_ALLOWED_IDS
+# Safety rules handed to the provider, so a denied command or write is
+# refused at the tool call. Empty here means unconstrained.
+policy:
+  commands:
+    default: ask
+    allow: []
+    deny: []
+  paths:
+    writable: []
+    deny: []
+  require_approval: []
+
+# Bounds on owner commands. Only the Telegram IDs in TELEGRAM_ALLOWED_IDS
 # may issue them; these limits apply on top of that.
 telegram:
   command_max_age: 10m
@@ -488,8 +499,25 @@ db_path: $MADAR_HOME/madar.db
 workspace_dir: $MADAR_HOME/workspaces
 EOF
 
-    step_done repos
     success "Config saved to $CONFIG_PATH"
+
+    # Create the project row. Without it the daemon has nothing to deliver and
+    # refuses to start, so this is part of installing rather than a later step
+    # the user has to discover.
+    info "Creating the project…"
+    if "$BIN_PATH" project create \
+        -config "$CONFIG_PATH" -env "$ENV_PATH" \
+        --repo "$repo" --name "$project_name" --goal "$project_goal"; then
+        success "Project created"
+    else
+        warn "Could not create the project automatically."
+        warn "Run this once the credentials are right:"
+        echo "   $BIN_PATH project create -config $CONFIG_PATH -env $ENV_PATH \\"
+        echo "     --repo $repo --name '$project_name' --goal '$project_goal'"
+    fi
+
+    state_set project_repo "$repo"
+    step_done project
 }
 
 # ── step: service ─────────────────────────────────────────────────────────────
@@ -606,9 +634,18 @@ uninstall() {
         rm -f "$plist"
     fi
     echo ""
-    warn "Binary and config preserved at $MADAR_HOME"
-    warn "To fully remove: rm -rf $MADAR_HOME"
-    success "Service removed"
+    success "Service removed and stopped"
+    echo ""
+    warn "Your data is still on disk at $MADAR_HOME:"
+    echo "    madar          the binary"
+    echo "    config.yaml    project settings"
+    echo "    .env           GitHub and Telegram credentials"
+    echo "    madar.db       project, backlog, and execution history"
+    echo "    workspaces/    the cloned repository"
+    echo ""
+    echo "  Nothing above is deleted, because the database is the only record"
+    echo "  of what the agent did. To remove it all once you are sure:"
+    echo "    rm -rf $MADAR_HOME"
 }
 
 # ── print final summary ───────────────────────────────────────────────────────
@@ -624,15 +661,19 @@ print_summary() {
     echo "  DB      : $MADAR_HOME/madar.db"
     echo ""
     echo "  Next steps:"
-    echo "   1. Open an issue on a watched repo and label it 'ready'"
-    echo "   2. Madar will pick it up on the next poll (~45s)"
-    echo "   3. Check status: $BIN_PATH -config $CONFIG_PATH -status"
+    echo "   1. Add work to the backlog:"
+    echo "      $BIN_PATH project add-task -config $CONFIG_PATH \\"
+    echo "        --repo $(state_get project_repo) --title 'First task' --goal 'What done looks like'"
+    echo "   2. Madar picks it up on the next tick (~30s) and advances it one step at a time"
+    echo "   3. Watch it work:"
+    echo "      $BIN_PATH -config $CONFIG_PATH -status"
     echo ""
-    echo "  To update credentials later:"
-    echo "   curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | bash -s -- --update-keys"
-    echo ""
-    echo "  To edit repos:"
-    echo "   \$EDITOR $CONFIG_PATH"
+    echo "  Useful commands:"
+    echo "   Backlog        : $BIN_PATH project list-tasks -config $CONFIG_PATH --repo $(state_get project_repo)"
+    echo "   Update Madar   : curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | bash -s -- --update"
+    echo "   Rotate keys    : curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | bash -s -- --update-keys"
+    echo "   Uninstall      : curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | bash -s -- --uninstall"
+    echo "   Edit config    : \$EDITOR $CONFIG_PATH"
     echo ""
 }
 
@@ -777,7 +818,7 @@ main() {
             auth_claude
             install_binary
             configure_credentials
-            configure_repos
+            configure_project
             install_service
             print_summary
             ;;

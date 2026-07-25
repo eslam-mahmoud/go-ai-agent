@@ -311,8 +311,10 @@ type reconcileClient struct {
 	pulls       map[string][]*githubclient.PullRequest
 	labelWrites int
 	closes      int
-	lastLabels  []string
-	getErr      error
+	// reads counts reconciliation passes that reached GitHub.
+	reads      int
+	lastLabels []string
+	getErr     error
 }
 
 func newReconcileClient() *reconcileClient {
@@ -327,6 +329,7 @@ func (fake *reconcileClient) GetIssue(
 	_, _ string,
 	number int,
 ) (*githubclient.Issue, error) {
+	fake.reads++
 	if fake.getErr != nil {
 		return nil, fake.getErr
 	}

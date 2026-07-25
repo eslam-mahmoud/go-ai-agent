@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/eslam-mahmoud/go-ai-agent/internal/app"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/config"
@@ -17,6 +18,7 @@ import (
 	claudeengine "github.com/eslam-mahmoud/go-ai-agent/internal/engine/claude"
 	githubclient "github.com/eslam-mahmoud/go-ai-agent/internal/github"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/orchestrator"
+	"github.com/eslam-mahmoud/go-ai-agent/internal/project"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/projectcli"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/store"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/telegram"
@@ -192,6 +194,42 @@ func main() {
 		log.Error("workspace setup failed", "err", err)
 		os.Exit(1)
 	}
+
+	// Reconcile before picking up work, so a restart repairs drift rather
+	// than building on it, then keep reconciling in the background.
+	if scheduler, err := project.NewReconcileScheduler(
+		mustReconciler(s, ghClient, log),
+		s,
+		cfg.Reconcile.Interval,
+		log,
+	); err != nil {
+		log.Warn("reconciliation disabled", "err", err)
+	} else {
+		if cfg.Reconcile.OnStartup {
+			if _, err := scheduler.ReconcileOnce(ctx); err != nil && ctx.Err() == nil {
+				// GitHub being unavailable must not stop delivery.
+				log.Warn("startup reconciliation failed", "err", err)
+			}
+		}
+		if cfg.Reconcile.Interval > 0 {
+			go func() {
+				ticker := time.NewTicker(cfg.Reconcile.Interval)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						if _, err := scheduler.ReconcileOnce(ctx); err != nil &&
+							ctx.Err() == nil {
+							log.Warn("periodic reconciliation failed", "err", err)
+						}
+					}
+				}
+			}()
+		}
+	}
+
 	if err := loop.Run(ctx); err != nil && err != context.Canceled {
 		log.Error("loop exited", "err", err)
 		os.Exit(1)
@@ -305,4 +343,19 @@ func newLogger(level string) *slog.Logger {
 		lvl = slog.LevelInfo
 	}
 	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
+}
+
+// mustReconciler builds the reconciler used by the daemon. A construction
+// failure is reported by the caller rather than crashing startup.
+func mustReconciler(
+	st *store.Store,
+	client githubclient.Client,
+	log *slog.Logger,
+) *project.Reconciler {
+	reconciler, err := project.NewReconciler(st, client)
+	if err != nil {
+		log.Warn("reconciler unavailable", "err", err)
+		return nil
+	}
+	return reconciler
 }

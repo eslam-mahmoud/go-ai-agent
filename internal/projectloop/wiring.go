@@ -213,6 +213,12 @@ func buildManager(
 		if err != nil {
 			return mode.ManagerRuntimeContext{}, err
 		}
+		// A taskless bootstrap review has no task to attribute an execution
+		// to, and executions are keyed by task. Zero means "not recorded",
+		// which the manager accepts.
+		if completedTaskID == 0 {
+			return mode.ManagerRuntimeContext{WorkDir: workDir}, nil
+		}
 		opened, err := recorder.Begin(projectID, completedTaskID, string(workflow.ModeManager))
 		if err != nil {
 			return mode.ManagerRuntimeContext{}, err
@@ -419,6 +425,10 @@ func (runner *recordedManager) RunManagerReview(
 	ctx context.Context, projectID, completedTaskID int64,
 ) (json.RawMessage, error) {
 	output, err := runner.manager.RunManagerReview(ctx, projectID, completedTaskID)
+	// A taskless review opened no execution, so there is nothing to close.
+	if completedTaskID == 0 {
+		return output, err
+	}
 	if err != nil {
 		_ = runner.recorder.FailRunning(
 			completedTaskID, string(workflow.ModeManager), "mode-run", err.Error(),

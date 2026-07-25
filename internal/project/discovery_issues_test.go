@@ -250,6 +250,9 @@ type fakeDiscoveryIssueClient struct {
 	ensuredLabels map[string]string
 	createErr     error
 	listErr       error
+	// failAfter makes CreateIssue fail once this many issues exist, which
+	// models GitHub dying partway through a batch.
+	failAfter int
 }
 
 func (fake *fakeDiscoveryIssueClient) ListOpenIssues(
@@ -270,6 +273,9 @@ func (fake *fakeDiscoveryIssueClient) CreateIssue(
 ) (*githubclient.Issue, error) {
 	if fake.createErr != nil {
 		return nil, fake.createErr
+	}
+	if fake.failAfter > 0 && fake.creates >= fake.failAfter {
+		return nil, errors.New("github is unavailable")
 	}
 	fake.creates++
 	fake.createdTitle = title

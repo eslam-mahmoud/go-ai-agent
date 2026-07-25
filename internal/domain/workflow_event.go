@@ -36,6 +36,8 @@ const (
 	WorkflowDiscoveryPublished         WorkflowEventType = "discovery.published"
 	WorkflowDiscoveryQueued            WorkflowEventType = "discovery.queued"
 	WorkflowArchitectureReviewRequired WorkflowEventType = "architecture.review-required"
+	WorkflowBacklogInitialized         WorkflowEventType = "backlog.initialized"
+	WorkflowTaskIssueFiled             WorkflowEventType = "task.issue-filed"
 )
 
 var ErrInvalidWorkflowEvent = errors.New("invalid workflow event")

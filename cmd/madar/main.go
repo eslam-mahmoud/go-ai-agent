@@ -20,6 +20,7 @@ import (
 	"github.com/eslam-mahmoud/go-ai-agent/internal/orchestrator"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/project"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/projectcli"
+	"github.com/eslam-mahmoud/go-ai-agent/internal/projectloop"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/store"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/telegram"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/updater"
@@ -228,6 +229,50 @@ func main() {
 				}
 			}()
 		}
+	}
+
+	// The owner command surface shares the v1 Telegram poller, so project
+	// commands work the moment project mode is on.
+	if router, err := projectloop.BuildCommands(cfg, s); err != nil {
+		log.Error("v2 command surface failed to start", "err", err)
+		os.Exit(1)
+	} else if router != nil {
+		loop.SetProjectCommands(router)
+		log.Info("v2 command surface enabled")
+	} else if cfg.Project.Enabled {
+		log.Warn("v2 commands disabled: telegram.allowed_ids is empty")
+	}
+
+	// Optional stages are passed only when their credentials exist, so the
+	// loop degrades to what it can actually do instead of failing on every
+	// call to a service that was never configured.
+	dependencies := projectloop.Dependencies{
+		Config: cfg,
+		Store:  s,
+		Engine: claudeengine.New(cfg.Claude.Bin),
+		Log:    log,
+	}
+	if cfg.GitHub.Token != "" {
+		dependencies.GitHub = ghClient
+	}
+	if cfg.Telegram.BotToken != "" {
+		dependencies.Status = tg
+	}
+
+	// Delivery starts only after recovery and reconciliation, so v2 never
+	// builds on state a restart has not yet repaired.
+	if delivery, err := projectloop.Build(dependencies); err != nil {
+		log.Error("v2 project mode failed to start", "err", err)
+		os.Exit(1)
+	} else if delivery != nil {
+		log.Info("v2 project mode enabled",
+			"repo", cfg.Project.Repo, "interval", cfg.Project.Interval)
+		go func() {
+			if err := delivery.Run(ctx, cfg.Project.Interval); err != nil &&
+				!errors.Is(err, context.Canceled) {
+				log.Error("v2 delivery loop exited", "err", err)
+			}
+		}()
 	}
 
 	if err := loop.Run(ctx); err != nil && err != context.Canceled {

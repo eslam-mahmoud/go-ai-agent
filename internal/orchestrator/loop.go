@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/eslam-mahmoud/go-ai-agent/internal/command"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/config"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/engine"
 	githubclient "github.com/eslam-mahmoud/go-ai-agent/internal/github"
@@ -35,6 +36,14 @@ type Loop struct {
 	lastUpdateCheckAt   time.Time
 	lastNotifiedVersion string
 	telegramOffset      int64 // next getUpdates offset; advances as messages are consumed
+	projectCommands     *command.Router
+}
+
+// SetProjectCommands enables the v2 command surface on the existing Telegram
+// poller. Running a second poller would make the two surfaces steal each
+// other's updates, so they share this one.
+func (l *Loop) SetProjectCommands(router *command.Router) {
+	l.projectCommands = router
 }
 
 // SetCurrentVersion enables the daily background update check.

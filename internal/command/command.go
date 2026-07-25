@@ -124,6 +124,15 @@ func (router *Router) Register(name Name, description string, handler Handler) e
 	return nil
 }
 
+// Knows reports whether a command is registered. A caller sharing one message
+// stream with another command surface uses this to decide whose command it is,
+// without authorizing — and therefore without rate-limiting — a message that
+// was never meant for this router.
+func (router *Router) Knows(name Name) bool {
+	_, registered := router.handlers[name]
+	return registered
+}
+
 // Dispatch authorizes then runs a command, returning the reply text. An
 // unauthorized sender never reaches a handler.
 func (router *Router) Dispatch(

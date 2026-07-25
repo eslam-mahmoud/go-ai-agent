@@ -178,6 +178,55 @@ func (coordinator *ReviewCoordinator) ReviewAfterTask(
 	return result, nil
 }
 
+// ReviewProject runs a manager review that is not about a completed task.
+// Bootstrapping needs this: the first task of a project has no predecessor to
+// review, so a task-keyed review could never select it.
+func (coordinator *ReviewCoordinator) ReviewProject(
+	ctx context.Context,
+	projectID int64,
+) (*ReviewResult, error) {
+	if projectID <= 0 {
+		return nil, fmt.Errorf(
+			"%w: project ID must be positive",
+			ErrInvalidManagerOutput,
+		)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	aggregate, err := coordinator.store.LoadProjectAggregate(projectID)
+	if err != nil {
+		return nil, err
+	}
+	if aggregate == nil || aggregate.Project == nil {
+		return nil, fmt.Errorf("%w: project aggregate is nil", ErrInconsistentState)
+	}
+	raw, err := coordinator.runner.RunManagerReview(ctx, projectID, 0)
+	if err != nil {
+		return nil, fmt.Errorf("run manager review: %w", err)
+	}
+	output, err := decodeManagerOutput(raw)
+	if err != nil {
+		return nil, err
+	}
+	if output.Status != "completed" {
+		return nil, incompleteManagerReview(output)
+	}
+	review, err := buildManagerReview(aggregate, nil, output)
+	if err != nil {
+		return nil, err
+	}
+	stored, err := coordinator.store.CreateManagerReview(review)
+	if err != nil {
+		return nil, err
+	}
+	result := &ReviewResult{Required: true, Review: stored}
+	if err := coordinator.applyDecisions(ctx, projectID, stored, result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 // applyDecisions runs the durable consequences of one persisted review. The
 // review itself stays recorded when a stage fails, so the caller may retry.
 func (coordinator *ReviewCoordinator) applyDecisions(
@@ -342,7 +391,7 @@ func buildManagerReview(
 	if len(output.BacklogChanges) > 0 {
 		review.BacklogChanges = output.BacklogChanges
 	}
-	if task.Status == domain.TaskCompleted {
+	if task != nil && task.Status == domain.TaskCompleted {
 		completed := task.ID
 		review.CompletedTaskID = &completed
 	}

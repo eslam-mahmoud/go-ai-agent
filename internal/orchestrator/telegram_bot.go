@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 
+	"github.com/eslam-mahmoud/go-ai-agent/internal/command"
+
 	"github.com/eslam-mahmoud/go-ai-agent/internal/config"
 	githubclient "github.com/eslam-mahmoud/go-ai-agent/internal/github"
 )
@@ -73,6 +75,29 @@ func (l *Loop) checkTelegramCommands(ctx context.Context) {
 	}
 }
 
+// dispatchProjectCommand offers a message to the v2 command router and
+// reports whether it belonged there. An unknown command is left for v1 so
+// enabling project mode never breaks an existing command.
+func (l *Loop) dispatchProjectCommand(
+	ctx context.Context, chatID int64, text string,
+) bool {
+	parsed, err := command.Parse(text, chatID, chatID)
+	if err != nil {
+		return false
+	}
+	if !l.projectCommands.Knows(parsed.Name) {
+		return false
+	}
+	reply, err := l.projectCommands.Dispatch(ctx, parsed)
+	if err != nil {
+		l.log.Warn("project command failed", "command", parsed.Name, "err", err)
+		_ = l.telegram.Reply(ctx, chatID, "That command failed. Check the logs.")
+		return true
+	}
+	_ = l.telegram.Reply(ctx, chatID, reply)
+	return true
+}
+
 // isAllowedChatID returns true if chatID is in the configured allowedIDs list.
 func (l *Loop) isAllowedChatID(chatID int64) bool {
 	needle := fmt.Sprintf("%d", chatID)
@@ -84,9 +109,19 @@ func (l *Loop) isAllowedChatID(chatID int64) bool {
 	return false
 }
 
-// handleTelegramMessage routes an inbound message. Currently supports /issue.
+// handleTelegramMessage routes an inbound message.
+//
+// The v2 project commands are offered the message first, because they carry
+// their own authorization, expiry, and rate limiting. Anything they do not
+// recognize falls through to the v1 surface unchanged, and there is only one
+// getUpdates poller so the two cannot steal each other's messages.
 func (l *Loop) handleTelegramMessage(ctx context.Context, chatID int64, text string) {
 	text = strings.TrimSpace(text)
+	if l.projectCommands != nil {
+		if handled := l.dispatchProjectCommand(ctx, chatID, text); handled {
+			return
+		}
+	}
 	switch {
 	case strings.HasPrefix(text, "/issue"):
 		l.handleIssueCommand(ctx, chatID, text)

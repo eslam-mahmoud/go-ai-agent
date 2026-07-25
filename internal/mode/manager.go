@@ -216,6 +216,26 @@ func (manager *Manager) Run(
 	return append(json.RawMessage(nil), raw...), nil
 }
 
+// RunManagerReview adapts Manager to the review coordinator's runner boundary.
+// It lives here rather than in the project package so the coordinator stays
+// free of engine and mode types.
+func (manager *Manager) RunManagerReview(
+	ctx context.Context,
+	projectID, completedTaskID int64,
+) (json.RawMessage, error) {
+	request := workflow.ModeRequest{
+		ProjectID: projectID,
+		TaskID:    completedTaskID,
+		Mode:      workflow.ModeManager,
+	}
+	// A taskless review carries no task status; a task-keyed one must name the
+	// completed status, which is the only state a review may follow.
+	if completedTaskID > 0 {
+		request.Status = domain.TaskCompleted
+	}
+	return manager.Run(ctx, request)
+}
+
 func validateManagerRequest(request workflow.ModeRequest) error {
 	switch {
 	case request.Mode != workflow.ModeManager:

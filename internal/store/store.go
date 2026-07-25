@@ -746,6 +746,24 @@ var migrations = []struct {
 			updated_at DATETIME NOT NULL
 		);
 	`},
+	// v18: durable owner input. Answers and approvals are recorded here and
+	// consumed by the workflow, so a chat message never mutates task state
+	// directly.
+	{18, `
+		CREATE TABLE owner_inputs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			task_id INTEGER REFERENCES project_tasks(id) ON DELETE SET NULL,
+			kind TEXT NOT NULL CHECK (kind IN ('answer', 'approval', 'rejection')),
+			subject TEXT NOT NULL DEFAULT '',
+			body TEXT NOT NULL DEFAULT '',
+			author TEXT NOT NULL DEFAULT '',
+			consumed INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME NOT NULL
+		);
+		CREATE INDEX idx_owner_inputs_pending
+			ON owner_inputs(project_id, kind, consumed, id);
+	`},
 }
 
 func (s *Store) migrate() error {

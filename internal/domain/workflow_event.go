@@ -39,6 +39,7 @@ const (
 	WorkflowBacklogInitialized         WorkflowEventType = "backlog.initialized"
 	WorkflowTaskIssueFiled             WorkflowEventType = "task.issue-filed"
 	WorkflowTaskPullRequestFound       WorkflowEventType = "task.pull-request-found"
+	WorkflowOwnerCommand               WorkflowEventType = "owner.command"
 )
 
 var ErrInvalidWorkflowEvent = errors.New("invalid workflow event")

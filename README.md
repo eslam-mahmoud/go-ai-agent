@@ -145,6 +145,8 @@ project:
     max_mode_retries: 0
 ```
 
+Startup order is deliberate: **v2 recovery, then reconciliation, then delivery**. Recovery repairs what a crash left half-written before reconciliation compares it against GitHub, so a restart never reconciles the wrong thing.
+
 Each tick advances the project exactly one step, which keeps the permanent invariant visible in the logs: one goal, one task, one branch, one delivery decision at a time.
 
 | Project state | What the tick does |
@@ -158,7 +160,9 @@ Each tick advances the project exactly one step, which keeps the permanent invar
 
 Mode outputs are written under `<workspace_dir>/.madar/executions/` and referenced from the `executions` table, which is how the developer reads the plan and the fixer reads the review across restarts.
 
-**Optional stages degrade rather than fail.** Without `GITHUB_TOKEN` the cycle still decides but cannot publish issues or read CI. Without a Telegram bot token there is no live status message and no command surface. Without `telegram.allowed_ids` the command surface is not built at all, since an empty allowlist authorizes nobody.
+Each tick also attaches any pull request a task's branch has opened, so the verifier sees a PR number rather than zero.
+
+**Optional stages degrade rather than fail.** Without `GITHUB_TOKEN` the cycle still decides but cannot publish issues, discover pull requests, or read CI. Without a Telegram bot token there is no live status message and no command surface. Without `telegram.allowed_ids` the command surface is not built at all, since an empty allowlist authorizes nobody.
 
 **Owner commands.** With project mode on, `/status`, `/project`, `/plan`, `/next`, `/logs`, `/pause`, `/resume`, `/cancel`, and `/retry` are answered by the v2 router, which enforces the allowlist, command expiry, and rate limits. They share the existing Telegram poller; any command the router does not know falls through to the v1 surface unchanged. Note that `/status` is answered by v2 once project mode is on.
 

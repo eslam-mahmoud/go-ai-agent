@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/eslam-mahmoud/go-ai-agent/internal/domain"
 	githubclient "github.com/eslam-mahmoud/go-ai-agent/internal/github"
@@ -237,16 +238,20 @@ func TestNewDiscoveryIssuePublisherRequiresDependencies(t *testing.T) {
 }
 
 type fakeDiscoveryIssueClient struct {
-	open          []*githubclient.Issue
-	nextNumber    int
-	creates       int
-	comments      int
-	listed        int
-	createdTitle  string
-	createdBody   string
-	createdLabels []string
-	commentIssue  int
-	commentBody   string
+	open           []*githubclient.Issue
+	nextNumber     int
+	creates        int
+	comments       int
+	listed         int
+	createdTitle   string
+	createdBody    string
+	createdLabels  []string
+	commentIssue   int
+	commentBody    string
+	postedComments []*githubclient.Comment
+	// recordErr fails the caller's store write after the comment is posted,
+	// which is the window a duplicate comment would appear in.
+	recordErr     error
 	ensuredLabels map[string]string
 	createErr     error
 	listErr       error
@@ -295,7 +300,18 @@ func (fake *fakeDiscoveryIssueClient) PostComment(
 	fake.comments++
 	fake.commentIssue = number
 	fake.commentBody = body
-	return &githubclient.Comment{ID: 1, Body: body}, nil
+	comment := &githubclient.Comment{ID: int64(fake.comments), Body: body}
+	fake.postedComments = append(fake.postedComments, comment)
+	return comment, nil
+}
+
+func (fake *fakeDiscoveryIssueClient) GetComments(
+	context.Context,
+	string, string,
+	int,
+	*time.Time,
+) ([]*githubclient.Comment, error) {
+	return fake.postedComments, nil
 }
 
 func (fake *fakeDiscoveryIssueClient) EnsureLabels(
@@ -312,7 +328,11 @@ func (fixture *reviewFixture) issuePublisher(
 	client DiscoveryIssueClient,
 ) *DiscoveryIssuePublisher {
 	t.Helper()
-	publisher, err := NewDiscoveryIssuePublisher(fixture.store, client)
+	var issueStore DiscoveryIssueStore = fixture.store
+	if fake, ok := client.(*fakeDiscoveryIssueClient); ok {
+		issueStore = &failingRecordStore{DiscoveryIssueStore: fixture.store, client: fake}
+	}
+	publisher, err := NewDiscoveryIssuePublisher(issueStore, client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,4 +388,57 @@ func (fixture *reviewFixture) decidedDiscovery(
 		t.Fatal(err)
 	}
 	return decided[0]
+}
+
+// A retry between the source-context comment and the recorded issue number
+// must not post the comment twice.
+func TestDiscoverySourceCommentIsPostedOnlyOnce(t *testing.T) {
+	t.Parallel()
+	fixture := newReviewFixture(t)
+	fixture.decidedDiscovery(t,
+		"Retry budget is unbounded", domain.DecisionAddToBacklog, domain.SeverityMedium)
+	client := &fakeDiscoveryIssueClient{
+		nextNumber: 900,
+		open:       []*githubclient.Issue{{Number: 41, Title: "Retry budget is unbounded"}},
+		recordErr:  errors.New("database is unavailable"),
+	}
+	publisher := fixture.issuePublisher(t, client)
+
+	// The first attempt comments, then fails before recording the number.
+	if _, err := publisher.PublishAcceptedDiscoveries(
+		context.Background(), fixture.projectID,
+	); err == nil {
+		t.Fatal("expected the recording failure to surface")
+	}
+	if client.comments != 1 {
+		t.Fatalf("first attempt posted %d comments", client.comments)
+	}
+
+	client.recordErr = nil
+	result, err := publisher.PublishAcceptedDiscoveries(context.Background(), fixture.projectID)
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if len(result.Reused) != 1 {
+		t.Fatalf("retry result = %#v", result)
+	}
+	if client.comments != 1 {
+		t.Fatalf("retry posted a duplicate comment: %d total", client.comments)
+	}
+}
+
+// failingRecordStore lets a test fail the issue-number write while leaving
+// every other store operation real.
+type failingRecordStore struct {
+	DiscoveryIssueStore
+	client *fakeDiscoveryIssueClient
+}
+
+func (wrapper *failingRecordStore) RecordDiscoveryIssue(
+	update store.DiscoveryIssueUpdate,
+) (*domain.Discovery, error) {
+	if wrapper.client.recordErr != nil {
+		return nil, wrapper.client.recordErr
+	}
+	return wrapper.DiscoveryIssueStore.RecordDiscoveryIssue(update)
 }

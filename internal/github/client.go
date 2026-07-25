@@ -18,6 +18,8 @@ type Issue struct {
 	Body    string
 	HTMLURL string
 	Labels  []string
+	// State is "open" or "closed" as reported by GitHub.
+	State string
 }
 
 type Comment struct {
@@ -325,6 +327,7 @@ func toIssue(i *gh.Issue) *Issue {
 		Title:   i.GetTitle(),
 		Body:    i.GetBody(),
 		HTMLURL: i.GetHTMLURL(),
+		State:   i.GetState(),
 	}
 	for _, l := range i.Labels {
 		issue.Labels = append(issue.Labels, l.GetName())

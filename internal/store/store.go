@@ -718,6 +718,23 @@ var migrations = []struct {
 			)
 		);
 	`},
+	// v16: notification history. Delivered rows also make notification
+	// idempotency durable across restarts.
+	{16, `
+		CREATE TABLE notifications (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			kind TEXT NOT NULL CHECK (length(trim(kind)) > 0),
+			idempotency_key TEXT NOT NULL DEFAULT '',
+			delivered INTEGER NOT NULL DEFAULT 0,
+			detail TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL
+		);
+		CREATE INDEX idx_notifications_project ON notifications(project_id, id);
+		CREATE UNIQUE INDEX idx_notifications_delivered_key
+			ON notifications(project_id, idempotency_key)
+			WHERE idempotency_key <> '' AND delivered = 1;
+	`},
 }
 
 func (s *Store) migrate() error {

@@ -153,6 +153,7 @@ type fakeTelegram struct {
 	clarificationCalled bool
 	completionCalled    bool
 	errorCalled         bool
+	sent                []string
 }
 
 func (f *fakeTelegram) NotifyClarification(_ context.Context, _, _ string) error {
@@ -170,6 +171,11 @@ func (f *fakeTelegram) NotifyError(_ context.Context, _ string, _ error) error {
 func (f *fakeTelegram) GetUpdates(_ context.Context, _ int64) ([]telegram.Update, error) {
 	return nil, nil
 }
+func (f *fakeTelegram) Send(_ context.Context, text string) error {
+	f.sent = append(f.sent, text)
+	return nil
+}
+
 func (f *fakeTelegram) Reply(_ context.Context, _ int64, _ string) error { return nil }
 
 // --- helpers ---

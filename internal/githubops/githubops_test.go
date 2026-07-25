@@ -13,10 +13,9 @@ import (
 func TestEnsureCommentPostsOncePerKey(t *testing.T) {
 	t.Parallel()
 	client := &fakeClient{issue: &githubclient.Issue{Number: 7, State: "open"}}
-	operations := newOperations(t, client)
 
-	result, err := operations.EnsureComment(
-		context.Background(), "owner", "repo", 7, "task:1:completed", "All done.",
+	result, err := EnsureComment(
+		context.Background(), client, "owner", "repo", 7, "task:1:completed", "All done.",
 	)
 	if err != nil {
 		t.Fatalf("EnsureComment: %v", err)
@@ -32,8 +31,8 @@ func TestEnsureCommentPostsOncePerKey(t *testing.T) {
 	}
 
 	// The same key is a no-op, even though the visible body differs.
-	repeat, err := operations.EnsureComment(
-		context.Background(), "owner", "repo", 7, "task:1:completed", "Different text.",
+	repeat, err := EnsureComment(
+		context.Background(), client, "owner", "repo", 7, "task:1:completed", "Different text.",
 	)
 	if err != nil {
 		t.Fatalf("repeat EnsureComment: %v", err)
@@ -46,8 +45,8 @@ func TestEnsureCommentPostsOncePerKey(t *testing.T) {
 	}
 
 	// A different key posts again.
-	other, err := operations.EnsureComment(
-		context.Background(), "owner", "repo", 7, "task:1:blocked", "Now blocked.",
+	other, err := EnsureComment(
+		context.Background(), client, "owner", "repo", 7, "task:1:blocked", "Now blocked.",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -64,11 +63,10 @@ func TestEnsureLabelsWritesOnlyOnRealDifference(t *testing.T) {
 		State:  "open",
 		Labels: []string{"madar:developing", "type:bug"},
 	}}
-	operations := newOperations(t, client)
 
 	// Same set, different order, with a duplicate and padding.
-	same, err := operations.EnsureLabels(
-		context.Background(), "owner", "repo", 7,
+	same, err := EnsureLabels(
+		context.Background(), client, "owner", "repo", 7,
 		[]string{"type:bug", " madar:developing ", "type:bug", ""},
 	)
 	if err != nil {
@@ -78,8 +76,8 @@ func TestEnsureLabelsWritesOnlyOnRealDifference(t *testing.T) {
 		t.Fatalf("same set wrote labels: %#v, writes = %d", same, client.labelWrites)
 	}
 
-	changed, err := operations.EnsureLabels(
-		context.Background(), "owner", "repo", 7,
+	changed, err := EnsureLabels(
+		context.Background(), client, "owner", "repo", 7,
 		[]string{"madar:reviewing", "type:bug"},
 	)
 	if err != nil {
@@ -96,42 +94,11 @@ func TestEnsureLabelsWritesOnlyOnRealDifference(t *testing.T) {
 	}
 }
 
-func TestEnsureIssueBodyWritesOnlyOnChange(t *testing.T) {
-	t.Parallel()
-	client := &fakeClient{issue: &githubclient.Issue{
-		Number: 7,
-		State:  "open",
-		Body:   "current body",
-	}}
-	operations := newOperations(t, client)
-
-	same, err := operations.EnsureIssueBody(
-		context.Background(), "owner", "repo", 7, "current body",
-	)
-	if err != nil {
-		t.Fatalf("EnsureIssueBody: %v", err)
-	}
-	if same.Performed || client.bodyWrites != 0 {
-		t.Fatalf("unchanged body wrote: %#v", same)
-	}
-
-	changed, err := operations.EnsureIssueBody(
-		context.Background(), "owner", "repo", 7, "new body",
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !changed.Performed || client.bodyWrites != 1 {
-		t.Fatalf("changed = %#v, writes = %d", changed, client.bodyWrites)
-	}
-}
-
 func TestEnsureIssueClosedSkipsAnAlreadyClosedIssue(t *testing.T) {
 	t.Parallel()
 	client := &fakeClient{issue: &githubclient.Issue{Number: 7, State: "open"}}
-	operations := newOperations(t, client)
 
-	closed, err := operations.EnsureIssueClosed(context.Background(), "owner", "repo", 7)
+	closed, err := EnsureIssueClosed(context.Background(), client, "owner", "repo", 7)
 	if err != nil {
 		t.Fatalf("EnsureIssueClosed: %v", err)
 	}
@@ -140,7 +107,7 @@ func TestEnsureIssueClosedSkipsAnAlreadyClosedIssue(t *testing.T) {
 	}
 
 	client.issue.State = "CLOSED"
-	repeat, err := operations.EnsureIssueClosed(context.Background(), "owner", "repo", 7)
+	repeat, err := EnsureIssueClosed(context.Background(), client, "owner", "repo", 7)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,44 +119,45 @@ func TestEnsureIssueClosedSkipsAnAlreadyClosedIssue(t *testing.T) {
 func TestOperationsValidateTheirInputs(t *testing.T) {
 	t.Parallel()
 	client := &fakeClient{issue: &githubclient.Issue{Number: 7, State: "open"}}
-	operations := newOperations(t, client)
 	ctx := context.Background()
 
-	if _, err := operations.EnsureComment(ctx, "owner", "repo", 7, "  ", "body"); !errors.Is(
+	if _, err := EnsureComment(ctx, client, "owner", "repo", 7, "  ", "body"); !errors.Is(
 		err, ErrInvalidOperation,
 	) {
 		t.Fatalf("missing key error = %v", err)
 	}
-	if _, err := operations.EnsureComment(ctx, "owner", "repo", 7, "key", "   "); !errors.Is(
+	if _, err := EnsureComment(ctx, client, "owner", "repo", 7, "key", "   "); !errors.Is(
 		err, ErrInvalidOperation,
 	) {
 		t.Fatalf("blank body error = %v", err)
 	}
 	for _, target := range [][2]string{{"", "repo"}, {"owner", ""}} {
-		if _, err := operations.EnsureLabels(
-			ctx, target[0], target[1], 7, nil,
+		if _, err := EnsureLabels(
+			ctx, client, target[0], target[1], 7, nil,
 		); !errors.Is(err, ErrInvalidOperation) {
 			t.Fatalf("target %v error = %v", target, err)
 		}
 	}
-	if _, err := operations.EnsureIssueClosed(ctx, "owner", "repo", 0); !errors.Is(
+	if _, err := EnsureIssueClosed(ctx, client, "owner", "repo", 0); !errors.Is(
 		err, ErrInvalidOperation,
 	) {
 		t.Fatalf("zero issue error = %v", err)
 	}
-	if client.posted+client.labelWrites+client.bodyWrites+client.closes != 0 {
+	if client.posted+client.labelWrites+client.closes != 0 {
 		t.Fatal("a rejected operation still wrote")
-	}
-	if _, err := New(nil); err == nil {
-		t.Fatal("nil client accepted")
 	}
 
 	// A missing issue is an error, not a silent skip.
-	missing := newOperations(t, &fakeClient{})
-	if _, err := missing.EnsureIssueClosed(ctx, "owner", "repo", 7); !errors.Is(
+	if _, err := EnsureIssueClosed(
+		ctx, &fakeClient{}, "owner", "repo", 7,
+	); !errors.Is(err, ErrInvalidOperation) {
+		t.Fatalf("missing issue error = %v", err)
+	}
+	// A nil client is rejected rather than panicking.
+	if _, err := EnsureComment(ctx, nil, "owner", "repo", 7, "key", "body"); !errors.Is(
 		err, ErrInvalidOperation,
 	) {
-		t.Fatalf("missing issue error = %v", err)
+		t.Fatalf("nil client error = %v", err)
 	}
 }
 
@@ -198,46 +166,37 @@ func TestOperationsPropagateClientFailures(t *testing.T) {
 	ctx := context.Background()
 	failure := errors.New("github is unavailable")
 
-	readFailure := newOperations(t, &fakeClient{getErr: failure})
-	if _, err := readFailure.EnsureLabels(ctx, "owner", "repo", 7, nil); !errors.Is(
+	readFailure := &fakeClient{getErr: failure}
+	if _, err := EnsureLabels(ctx, readFailure, "owner", "repo", 7, nil); !errors.Is(
 		err, failure,
 	) {
 		t.Fatalf("read failure = %v", err)
 	}
 
-	commentFailure := newOperations(t, &fakeClient{
+	commentFailure := &fakeClient{
 		issue:      &githubclient.Issue{Number: 7, State: "open"},
 		commentErr: failure,
-	})
-	if _, err := commentFailure.EnsureComment(
-		ctx, "owner", "repo", 7, "key", "body",
+	}
+	if _, err := EnsureComment(
+		ctx, commentFailure, "owner", "repo", 7, "key", "body",
 	); !errors.Is(err, failure) {
 		t.Fatalf("comment failure = %v", err)
 	}
 
-	writeFailure := newOperations(t, &fakeClient{
+	writeFailure := &fakeClient{
 		issue:    &githubclient.Issue{Number: 7, State: "open"},
 		writeErr: failure,
-	})
-	if _, err := writeFailure.EnsureLabels(
-		ctx, "owner", "repo", 7, []string{"type:bug"},
+	}
+	if _, err := EnsureLabels(
+		ctx, writeFailure, "owner", "repo", 7, []string{"type:bug"},
 	); !errors.Is(err, failure) {
 		t.Fatalf("label write failure = %v", err)
 	}
-	if _, err := writeFailure.EnsureIssueClosed(ctx, "owner", "repo", 7); !errors.Is(
+	if _, err := EnsureIssueClosed(ctx, writeFailure, "owner", "repo", 7); !errors.Is(
 		err, failure,
 	) {
 		t.Fatalf("close failure = %v", err)
 	}
-}
-
-func newOperations(t *testing.T, client Client) *Operations {
-	t.Helper()
-	operations, err := New(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return operations
 }
 
 type fakeClient struct {
@@ -245,7 +204,6 @@ type fakeClient struct {
 	comments    []*githubclient.Comment
 	posted      int
 	labelWrites int
-	bodyWrites  int
 	closes      int
 	lastComment string
 	lastLabels  []string
@@ -302,22 +260,6 @@ func (fake *fakeClient) ReplaceLabels(
 		fake.issue.Labels = labels
 	}
 	return nil
-}
-
-func (fake *fakeClient) UpdateIssueBody(
-	_ context.Context,
-	_, _ string,
-	_ int,
-	body string,
-) (*githubclient.Issue, error) {
-	if fake.writeErr != nil {
-		return nil, fake.writeErr
-	}
-	fake.bodyWrites++
-	if fake.issue != nil {
-		fake.issue.Body = body
-	}
-	return fake.issue, nil
 }
 
 func (fake *fakeClient) CloseIssue(context.Context, string, string, int) error {

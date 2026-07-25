@@ -16,6 +16,7 @@ import (
 	"github.com/eslam-mahmoud/go-ai-agent/internal/config"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/domain"
 	githubclient "github.com/eslam-mahmoud/go-ai-agent/internal/github"
+	"github.com/eslam-mahmoud/go-ai-agent/internal/project"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/projectfiles"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/projectissue"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/store"
@@ -112,6 +113,15 @@ func Run(args []string, stdout, stderr io.Writer) error {
 			stdout,
 			stderr,
 			func(token string) projectissue.Client {
+				return githubclient.New(token)
+			},
+		)
+	case "reconcile":
+		return runReconcile(
+			args[1:],
+			stdout,
+			stderr,
+			func(token string) project.ReconcileClient {
 				return githubclient.New(token)
 			},
 		)
@@ -365,6 +375,88 @@ func runSyncFiles(args []string, stdout, stderr io.Writer) error {
 
 type issueClientFactory func(token string) projectissue.Client
 
+type reconcileClientFactory func(token string) project.ReconcileClient
+
+// runReconcile runs one reconciliation pass and prints what converged and what
+// drifted, so an operator can see the difference without reading logs.
+func runReconcile(
+	args []string,
+	stdout, stderr io.Writer,
+	newClient reconcileClientFactory,
+) error {
+	fs := newFlagSet("project reconcile", stderr)
+	cfgFlags := addConfigFlags(fs)
+	repo := fs.String("repo", "", "project repository identity")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if err := requireValues(requiredValue{"repo", *repo}); err != nil {
+		return err
+	}
+	cfg, err := loadConfig(cfgFlags)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(cfg.GitHub.Token) == "" {
+		return errors.New("GITHUB_TOKEN is required for project reconcile")
+	}
+	s, err := store.Open(cfg.DBPath)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	projectRecord, err := requireProject(s, *repo)
+	if err != nil {
+		return err
+	}
+	reconciler, err := project.NewReconciler(s, newClient(cfg.GitHub.Token))
+	if err != nil {
+		return err
+	}
+	result, err := reconciler.Reconcile(context.Background(), projectRecord.ID)
+	if err != nil {
+		return err
+	}
+
+	converged := 0
+	drift := 0
+	for _, task := range result.Tasks {
+		if task.LabelsUpdated || task.IssueClosed || task.PullRequestBound > 0 {
+			converged++
+			fmt.Fprintf(stdout, "task %d:", task.TaskID)
+			if task.LabelsUpdated {
+				fmt.Fprint(stdout, " labels")
+			}
+			if task.IssueClosed {
+				fmt.Fprintf(stdout, " closed #%d", task.IssueNumber)
+			}
+			if task.PullRequestBound > 0 {
+				fmt.Fprintf(stdout, " pull request #%d", task.PullRequestBound)
+			}
+			fmt.Fprintln(stdout)
+		}
+		for _, entry := range task.Drift {
+			drift++
+			fmt.Fprintf(stdout, "drift: task %d: %s\n", task.TaskID, entry)
+		}
+	}
+	for _, ambiguous := range result.Ambiguous {
+		fmt.Fprintf(
+			stdout,
+			"ambiguous: task %d branch %s has open pull requests %v\n",
+			ambiguous.TaskID,
+			ambiguous.Branch,
+			ambiguous.Numbers,
+		)
+	}
+	fmt.Fprintf(
+		stdout,
+		"reconciled %d task(s): %d converged, %d drift, %d ambiguous\n",
+		len(result.Tasks), converged, drift, len(result.Ambiguous),
+	)
+	return nil
+}
+
 func runSyncIssue(
 	args []string,
 	stdout, stderr io.Writer,
@@ -606,6 +698,7 @@ func printUsage(w io.Writer) {
   madar project list-tasks --repo owner/name [options]
   madar project sync-files --repo owner/name [options]
   madar project sync-issue --repo owner/name [options]
+  madar project reconcile --repo owner/name [options]
 
 Every subcommand accepts --config and --env.`)
 }

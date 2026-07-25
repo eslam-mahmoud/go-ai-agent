@@ -42,43 +42,8 @@ type LabelClient interface {
 	ReplaceLabels(ctx context.Context, owner, repo string, number int, labels []string) error
 }
 
-type BodyClient interface {
-	IssueReader
-	UpdateIssueBody(
-		ctx context.Context,
-		owner, repo string,
-		number int,
-		body string,
-	) (*githubclient.Issue, error)
-}
-
 type CloseClient interface {
 	IssueReader
-	CloseIssue(ctx context.Context, owner, repo string, number int) error
-}
-
-// Client is the full surface, for callers that hold one.
-type Client interface {
-	GetIssue(ctx context.Context, owner, repo string, number int) (*githubclient.Issue, error)
-	GetComments(
-		ctx context.Context,
-		owner, repo string,
-		number int,
-		since *time.Time,
-	) ([]*githubclient.Comment, error)
-	PostComment(
-		ctx context.Context,
-		owner, repo string,
-		number int,
-		body string,
-	) (*githubclient.Comment, error)
-	ReplaceLabels(ctx context.Context, owner, repo string, number int, labels []string) error
-	UpdateIssueBody(
-		ctx context.Context,
-		owner, repo string,
-		number int,
-		body string,
-	) (*githubclient.Issue, error)
 	CloseIssue(ctx context.Context, owner, repo string, number int) error
 }
 
@@ -91,54 +56,6 @@ type Result struct {
 func skipped(reason string) *Result { return &Result{Reason: reason} }
 
 func performed() *Result { return &Result{Performed: true} }
-
-type Operations struct {
-	client Client
-}
-
-func New(client Client) (*Operations, error) {
-	if client == nil {
-		return nil, errors.New("GitHub operations client is required")
-	}
-	return &Operations{client: client}, nil
-}
-
-// Operations methods are thin wrappers for callers holding a full client.
-
-func (operations *Operations) EnsureComment(
-	ctx context.Context,
-	owner, repo string,
-	number int,
-	key, body string,
-) (*Result, error) {
-	return EnsureComment(ctx, operations.client, owner, repo, number, key, body)
-}
-
-func (operations *Operations) EnsureLabels(
-	ctx context.Context,
-	owner, repo string,
-	number int,
-	labels []string,
-) (*Result, error) {
-	return EnsureLabels(ctx, operations.client, owner, repo, number, labels)
-}
-
-func (operations *Operations) EnsureIssueBody(
-	ctx context.Context,
-	owner, repo string,
-	number int,
-	body string,
-) (*Result, error) {
-	return EnsureIssueBody(ctx, operations.client, owner, repo, number, body)
-}
-
-func (operations *Operations) EnsureIssueClosed(
-	ctx context.Context,
-	owner, repo string,
-	number int,
-) (*Result, error) {
-	return EnsureIssueClosed(ctx, operations.client, owner, repo, number)
-}
 
 // CommentMarker renders the hidden marker that identifies a comment Madar
 // already posted. It is exported so callers can recognize their own comments.
@@ -217,36 +134,6 @@ func EnsureLabels(
 	}
 	if err := client.ReplaceLabels(ctx, owner, repo, number, desired); err != nil {
 		return nil, fmt.Errorf("replace labels: %w", err)
-	}
-	return performed(), nil
-}
-
-// EnsureIssueBody writes only when the body differs.
-func EnsureIssueBody(
-	ctx context.Context,
-	client BodyClient,
-	owner, repo string,
-	number int,
-	body string,
-) (*Result, error) {
-	if client == nil {
-		return nil, fmt.Errorf("%w: body client is required", ErrInvalidOperation)
-	}
-	if err := requireTarget(owner, repo, number); err != nil {
-		return nil, err
-	}
-	issue, err := client.GetIssue(ctx, owner, repo, number)
-	if err != nil {
-		return nil, fmt.Errorf("read issue body: %w", err)
-	}
-	if issue == nil {
-		return nil, fmt.Errorf("%w: issue #%d was not found", ErrInvalidOperation, number)
-	}
-	if issue.Body == body {
-		return skipped("body already matches"), nil
-	}
-	if _, err := client.UpdateIssueBody(ctx, owner, repo, number, body); err != nil {
-		return nil, fmt.Errorf("update issue body: %w", err)
 	}
 	return performed(), nil
 }

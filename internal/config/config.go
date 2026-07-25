@@ -27,6 +27,7 @@ type Config struct {
 	Claude       ClaudeConfig
 	CI           CIConfig
 	Cleanup      CleanupConfig
+	Reconcile    ReconcileConfig
 	GitHub       GitHubConfig
 	Telegram     TelegramConfig
 	DBPath       string
@@ -81,6 +82,13 @@ type CleanupConfig struct {
 	Interval          time.Duration // how often to run pruning (default 24h)
 	AuditLogRetention time.Duration // delete audit entries older than this (default 30d)
 	TaskRetention     time.Duration // delete done tasks older than this (default 90d)
+}
+
+// ReconcileConfig controls GitHub reconciliation. A zero interval disables
+// periodic passes; startup reconciliation is controlled separately.
+type ReconcileConfig struct {
+	Interval  time.Duration // how often to reconcile (default 15m, 0 disables)
+	OnStartup bool          // reconcile once before picking up work (default true)
 }
 
 type ConcurrencyConfig struct {
@@ -178,6 +186,10 @@ type rawConfig struct {
 		AutoMerge       bool   `yaml:"auto_merge"`
 		MergeMethod     string `yaml:"merge_method"`
 	} `yaml:"ci"`
+	Reconcile struct {
+		IntervalStr string `yaml:"interval"`
+		OnStartup   *bool  `yaml:"on_startup"`
+	} `yaml:"reconcile"`
 	Cleanup struct {
 		IntervalStr          string `yaml:"interval"`
 		AuditLogRetentionStr string `yaml:"audit_log_retention"`
@@ -219,6 +231,13 @@ func Load(configPath, envPath string) (*Config, error) {
 	ciWaitTimeout, err := time.ParseDuration(raw.CI.WaitTimeoutStr)
 	if err != nil {
 		return nil, fmt.Errorf("parse ci.wait_timeout %q: %w", raw.CI.WaitTimeoutStr, err)
+	}
+	reconcileInterval, err := time.ParseDuration(raw.Reconcile.IntervalStr)
+	if err != nil {
+		return nil, fmt.Errorf("parse reconcile.interval %q: %w", raw.Reconcile.IntervalStr, err)
+	}
+	if reconcileInterval < 0 {
+		return nil, fmt.Errorf("reconcile.interval cannot be negative")
 	}
 	cleanupInterval, err := time.ParseDuration(raw.Cleanup.IntervalStr)
 	if err != nil {
@@ -275,6 +294,10 @@ func Load(configPath, envPath string) (*Config, error) {
 			WaitTimeout:  ciWaitTimeout,
 			AutoMerge:    raw.CI.AutoMerge,
 			MergeMethod:  raw.CI.MergeMethod,
+		},
+		Reconcile: ReconcileConfig{
+			Interval:  reconcileInterval,
+			OnStartup: *raw.Reconcile.OnStartup,
 		},
 		Cleanup: CleanupConfig{
 			Interval:          cleanupInterval,
@@ -345,6 +368,14 @@ func applyDefaults(raw *rawConfig) {
 	}
 	if raw.CI.WaitTimeoutStr == "" {
 		raw.CI.WaitTimeoutStr = "20m"
+	}
+	if raw.Reconcile.IntervalStr == "" {
+		raw.Reconcile.IntervalStr = "15m"
+	}
+	if raw.Reconcile.OnStartup == nil {
+		// A restart should repair drift before building on it.
+		enabled := true
+		raw.Reconcile.OnStartup = &enabled
 	}
 	if raw.Cleanup.IntervalStr == "" {
 		raw.Cleanup.IntervalStr = "24h"

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/eslam-mahmoud/go-ai-agent/internal/project"
 	"os"
 	"path/filepath"
 	"strings"
@@ -693,4 +694,127 @@ func mustRun(t *testing.T, configPath string, args ...string) string {
 		t.Fatalf("%s: %v\nstderr: %s", strings.Join(args, " "), err, stderr.String())
 	}
 	return stdout.String()
+}
+
+func TestReconcileReportsConvergenceAndDrift(t *testing.T) {
+	configPath, dbPath := writeTestConfig(t)
+	mustRun(t, configPath,
+		"create", "--repo", "owner/repo", "--name", "Madar", "--goal", "Ship v2",
+	)
+	t.Setenv("GITHUB_TOKEN", "test-token")
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectRecord, err := s.GetProjectByRepo("owner/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := domain.NewTask(projectRecord.ID, "Filed work", "Do it")
+	task.Status = domain.TaskDeveloping
+	task.IssueNumber = 91
+	task.BranchName = "madar/issue-91"
+	if _, err := s.CreateProjectTask(task); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &fakeReconcileCLIClient{
+		issues: map[int]*githubclient.Issue{
+			91: {Number: 91, State: "open", Labels: []string{"madar:queued", "keep-me"}},
+		},
+		pulls: map[string][]*githubclient.PullRequest{
+			"madar/issue-91": {
+				{Number: 51, State: "closed", Merged: true, HeadBranch: "madar/issue-91"},
+			},
+		},
+	}
+	args := withConfig(configPath, "reconcile", "--repo", "owner/repo")[1:]
+	var stdout, stderr bytes.Buffer
+	if err := runReconcile(args, &stdout, &stderr, func(string) project.ReconcileClient {
+		return client
+	}); err != nil {
+		t.Fatalf("reconcile: %v\nstderr: %s", err, stderr.String())
+	}
+	output := stdout.String()
+	for _, fragment := range []string{
+		"labels",
+		"pull request #51",
+		"drift:",
+		"merged while the task is",
+		"reconciled 1 task(s)",
+	} {
+		if !strings.Contains(output, fragment) {
+			t.Fatalf("output missing %q:\n%s", fragment, output)
+		}
+	}
+	// The human label survived reconciliation.
+	if !containsLabel(client.lastLabels, "keep-me") {
+		t.Fatalf("labels = %v", client.lastLabels)
+	}
+}
+
+func TestReconcileRequiresGitHubToken(t *testing.T) {
+	configPath, _ := writeTestConfig(t)
+	mustRun(t, configPath,
+		"create", "--repo", "owner/repo", "--name", "Madar", "--goal", "Ship v2",
+	)
+	t.Setenv("GITHUB_TOKEN", "")
+	args := withConfig(configPath, "reconcile", "--repo", "owner/repo")[1:]
+	var stdout, stderr bytes.Buffer
+	err := runReconcile(args, &stdout, &stderr, func(string) project.ReconcileClient {
+		t.Fatal("client was built without a token")
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "GITHUB_TOKEN") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func containsLabel(labels []string, want string) bool {
+	for _, label := range labels {
+		if label == want {
+			return true
+		}
+	}
+	return false
+}
+
+type fakeReconcileCLIClient struct {
+	issues     map[int]*githubclient.Issue
+	pulls      map[string][]*githubclient.PullRequest
+	lastLabels []string
+}
+
+func (fake *fakeReconcileCLIClient) GetIssue(
+	_ context.Context, _, _ string, number int,
+) (*githubclient.Issue, error) {
+	return fake.issues[number], nil
+}
+
+func (fake *fakeReconcileCLIClient) ReplaceLabels(
+	_ context.Context, _, _ string, number int, labels []string,
+) error {
+	fake.lastLabels = labels
+	if issue, ok := fake.issues[number]; ok {
+		issue.Labels = labels
+	}
+	return nil
+}
+
+func (fake *fakeReconcileCLIClient) CloseIssue(
+	_ context.Context, _, _ string, number int,
+) error {
+	if issue, ok := fake.issues[number]; ok {
+		issue.State = "closed"
+	}
+	return nil
+}
+
+func (fake *fakeReconcileCLIClient) ListPullRequestsForBranch(
+	_ context.Context, _, _, branch string,
+) ([]*githubclient.PullRequest, error) {
+	return fake.pulls[branch], nil
 }

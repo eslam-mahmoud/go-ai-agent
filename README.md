@@ -2,13 +2,25 @@
 
 > *Madar (مدار, "orbit") — a single autonomous agent that loops continuously, pulling work from a GitHub Issues board and running it through Claude Code.*
 
-Madar is a Go binary that runs on a server (e.g. an EC2 instance) and acts as an autonomous software engineer. It polls GitHub Issues for tasks, executes them using the Claude Code CLI, posts results back as comments, and notifies you over Telegram when it needs your input. You manage work by creating and labelling GitHub Issues — no custom UI, no webhooks, no extra infrastructure.
+Madar is a Go binary that runs on a server (e.g. an EC2 instance) and acts as an autonomous software engineer. You manage work through GitHub — no custom UI, no webhooks, no extra infrastructure.
+
+Madar has two modes, and it is worth being precise about which one runs today.
+
+| | **v1 — issue mode** | **v2 — project mode** |
+| --- | --- | --- |
+| What it does | Polls labelled GitHub Issues and runs each through the Claude Code CLI | Owns a project goal, plans a backlog, and delivers one task at a time through Planner → Developer → Reviewer → Verifier, with an Engineering Manager deciding what happens next |
+| Status | **This is what the daemon runs.** Supported and unchanged. | Domain, storage, modes, and controllers are implemented and tested. **The delivery loop is not yet driven by the daemon** — see [v2 status](#v2-status). |
+| How you use it | Label an issue `ready` | `madar project` subcommands, plus GitHub reconciliation which the daemon does run |
+
+If you are deploying Madar today, you are deploying v1 issue mode. The v2 sections below describe what exists and what does not.
 
 ---
 
 ## Table of Contents
 
-- [How It Works](#how-it-works)
+- [How It Works](#how-it-works) ← v1 issue mode
+- [Madar v2 — Project Mode](#madar-v2--project-mode)
+- [v2 Status](#v2-status) ← what is and is not wired
 - [CI/CD Feedback Loop](#cicd-feedback-loop)
 - [Architecture](#architecture)
 - [Design Decisions](#design-decisions)
@@ -53,6 +65,82 @@ GitHub Issue (ready)
            ▼
          done
 ```
+
+---
+
+## Madar v2 — Project Mode
+
+v2 replaces "run whatever issue is labelled ready" with a managed project.
+
+### The permanent invariant
+
+> One project goal, one active task, one branch, one pull request, and one delivery decision at a time.
+
+This is a product decision, not a temporary limitation. Sequential delivery is what keeps an autonomous agent coherent, observable, and recoverable. The single-active-task rule is enforced by a database index, not by convention.
+
+### The delivery cycle
+
+```
+Engineering Manager selects one task, with a recorded reason
+        ↓
+Planner → Developer → Reviewer → Verifier → (CI) → completed
+        ↑         ↓
+        └── fix ──┘   (bounded review/fix cycles)
+        ↓
+Engineering Manager reviews the result
+        ↓
+evaluates discoveries · reorders the backlog · selects the next task
+```
+
+Every transition passes through one validator. A task cannot be selected without a completed manager review, cannot enter development without a plan, and cannot complete without successful verification.
+
+### Discoveries
+
+Implementation reveals work the plan did not anticipate. Any mode can report discoveries; Madar gives each a stable content-derived identity, deduplicates repeats, and requires the manager to decide every pending one before a review can finish. Accepted work becomes a GitHub issue and an ordered backlog task.
+
+### Architecture
+
+An architecture-risk discovery, or a manager request, raises an architecture obligation. While one is outstanding, no new task may be selected. Architect mode proposes component boundaries, decisions, dependencies, and risks; Madar renders them into `AGENTS.md`, `docs/architecture/`, and ADRs, preserving human-authored content.
+
+### Safety
+
+- **Policy** — command and path rules where deny always beats allow, and an unset policy asks rather than allows.
+- **Budgets** — task duration, review/fix cycles, CI fix cycles, and mode retries, all derived from durable history so a restart cannot reset them.
+- **Approvals** — configured high-risk actions require a human decision.
+
+### Reconciliation
+
+Madar compares durable state against GitHub, converges what is safe (status labels within the `madar:` namespace, closing a completed task's issue, binding a branch's pull request), and reports the rest as drift. Labels outside the `madar:` namespace are never touched.
+
+---
+
+## v2 Status
+
+The v2 backlog is implemented and tested, but not all of it is driven by the daemon yet. This section says exactly which is which, because a README that implies otherwise is worse than no README.
+
+**Running in the daemon today**
+
+- v1 issue mode — the polling loop, Claude execution, CI feedback, Telegram notifications.
+- **GitHub reconciliation** — one pass at startup before work is picked up, then on `reconcile.interval`. A failing pass is logged and retried; it never stops delivery.
+
+**Available from the command line**
+
+| Command | What it does |
+| --- | --- |
+| `madar project create --repo owner/name --name N --goal G` | Create a managed project |
+| `madar project list` / `show --repo owner/name` | Inspect projects and their backlog |
+| `madar project add-task --repo owner/name --title T --goal G` | Add a backlog task |
+| `madar project list-tasks --repo owner/name` | List the ordered backlog |
+| `madar project sync-files --repo owner/name` | Write `.madar/project.yaml` and `.madar/plan.md` |
+| `madar project sync-issue --repo owner/name` | Create or update the parent dashboard issue |
+| `madar project reconcile --repo owner/name` | Run one reconciliation pass and report drift |
+| `madar migrate-project --repo owner/name` | Migrate a v1 repository into a v2 project |
+
+**Implemented and tested, but not yet driven by the daemon**
+
+The delivery modes, the sequential workflow engine, the Engineering Manager loop, discovery extraction and decisions, Architect mode and document generation, project initialization, the Telegram command surface and live status message, the policy engine, and budgets.
+
+Each is complete, unit-tested, and exercised end to end by `internal/e2e` — but `cmd/madar/main.go` does not construct them, so a running daemon does not execute the v2 delivery cycle. Wiring that is tracked as a follow-up on the [v2 tracker](https://github.com/eslam-mahmoud/go-ai-agent/issues/67).
 
 ---
 
@@ -407,6 +495,20 @@ cleanup:
   audit_log_retention: 720h  # delete audit entries older than 30 days
   task_retention: 2160h      # delete done tasks older than 90 days
 
+# v2: GitHub reconciliation. The daemon reconciles once at startup, before it
+# picks up work, so a restart repairs drift rather than building on it.
+reconcile:
+  interval: 15m        # how often to reconcile; 0 runs only the startup pass
+  on_startup: true     # reconcile before picking up work
+
+# v2: bounds on owner commands, applied on top of TELEGRAM_ALLOWED_IDS.
+# Only the configured IDs may issue commands at all.
+telegram:
+  command_max_age: 10m         # refuse commands older than this
+  rate_window: 1m              # sliding window for rate limiting
+  max_commands_per_window: 20  # read-only commands per sender per window
+  max_control_per_window: 5    # control commands: tighter, since they change delivery
+
 # Local paths
 db_path: /opt/madar/madar.db
 workspace_dir: /opt/madar/workspaces
@@ -591,6 +693,18 @@ to operate during the compatibility period.
 │   ├── telegram/
 │   │   ├── gateway.go           # Telegram Bot API notifications
 │   │   └── gateway_test.go
+│   ├── domain/                  # v2 project, task, execution, discovery types
+│   ├── workflow/                # v2 state machine and sequential delivery
+│   ├── mode/                    # v2 delivery modes and output schemas
+│   ├── project/                 # v2 controllers: selection, review, backlog,
+│   │                            #   discoveries, architecture, reconciliation
+│   ├── policy/                  # v2 safety policy, budgets, and metrics
+│   ├── notify/                  # v2 notification router and live status
+│   ├── command/                 # v2 owner commands and authorization
+│   ├── reposcan/                # v2 read-only repository inspection
+│   ├── architecturedocs/        # v2 AGENTS.md and architecture generation
+│   ├── githubops/               # v2 idempotent GitHub operations
+│   ├── e2e/                     # v2 deterministic end-to-end fixtures
 │   └── orchestrator/
 │       ├── loop.go              # Main poll loop + task state machine
 │       ├── loop_test.go

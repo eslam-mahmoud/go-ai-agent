@@ -735,6 +735,17 @@ var migrations = []struct {
 			ON notifications(project_id, idempotency_key)
 			WHERE idempotency_key <> '' AND delivered = 1;
 	`},
+	// v17: the identity of each project's live status message, so a restart
+	// keeps editing one message instead of posting another.
+	{17, `
+		CREATE TABLE status_messages (
+			project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+			chat_id INTEGER NOT NULL,
+			message_id INTEGER NOT NULL,
+			last_text TEXT NOT NULL DEFAULT '',
+			updated_at DATETIME NOT NULL
+		);
+	`},
 }
 
 func (s *Store) migrate() error {

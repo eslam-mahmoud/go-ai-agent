@@ -176,6 +176,16 @@ func (f *fakeTelegram) Send(_ context.Context, text string) error {
 	return nil
 }
 
+func (f *fakeTelegram) SendStatus(_ context.Context, text string) (int64, int64, error) {
+	f.sent = append(f.sent, text)
+	return 1, 1, nil
+}
+
+func (f *fakeTelegram) EditStatus(_ context.Context, _, _ int64, text string) error {
+	f.sent = append(f.sent, text)
+	return nil
+}
+
 func (f *fakeTelegram) Reply(_ context.Context, _ int64, _ string) error { return nil }
 
 // --- helpers ---

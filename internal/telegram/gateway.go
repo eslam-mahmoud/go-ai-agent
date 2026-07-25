@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -40,6 +41,12 @@ type Gateway interface {
 	// Send broadcasts already-rendered text to every configured chat. It is
 	// the delivery half of the v2 notification router.
 	Send(ctx context.Context, text string) error
+	// SendStatus posts a message and returns its identity so it can be edited
+	// in place later. It targets the first configured chat only, since one
+	// live status message per project is the point.
+	SendStatus(ctx context.Context, text string) (chatID, messageID int64, err error)
+	// EditStatus replaces the text of a previously sent status message.
+	EditStatus(ctx context.Context, chatID, messageID int64, text string) error
 }
 
 type gateway struct {
@@ -161,6 +168,103 @@ func (g *gateway) send(ctx context.Context, chatID, text string) error {
 // owns delivery.
 func (g *gateway) Send(ctx context.Context, text string) error {
 	return g.broadcast(ctx, text)
+}
+
+type editMessageRequest struct {
+	ChatID    int64  `json:"chat_id"`
+	MessageID int64  `json:"message_id"`
+	Text      string `json:"text"`
+	ParseMode string `json:"parse_mode"`
+}
+
+// SendStatus posts to the first configured chat and returns the identity of
+// the message, so later updates edit it instead of adding to the timeline.
+func (g *gateway) SendStatus(
+	ctx context.Context,
+	text string,
+) (int64, int64, error) {
+	if g.botToken == "" || len(g.allowedIDs) == 0 {
+		return 0, 0, nil
+	}
+	chatID, err := strconv.ParseInt(strings.TrimSpace(g.allowedIDs[0]), 10, 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("parse telegram chat ID: %w", err)
+	}
+	payload, err := json.Marshal(sendMessageRequest{
+		ChatID:    strings.TrimSpace(g.allowedIDs[0]),
+		Text:      truncateForTelegram(text),
+		ParseMode: "Markdown",
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	var response struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			MessageID int64 `json:"message_id"`
+		} `json:"result"`
+	}
+	if err := g.post(ctx, "sendMessage", payload, &response); err != nil {
+		return 0, 0, err
+	}
+	if !response.OK || response.Result.MessageID == 0 {
+		return 0, 0, fmt.Errorf("telegram did not return a message ID")
+	}
+	return chatID, response.Result.MessageID, nil
+}
+
+func (g *gateway) EditStatus(
+	ctx context.Context,
+	chatID, messageID int64,
+	text string,
+) error {
+	if g.botToken == "" || chatID == 0 || messageID == 0 {
+		return nil
+	}
+	payload, err := json.Marshal(editMessageRequest{
+		ChatID:    chatID,
+		MessageID: messageID,
+		Text:      truncateForTelegram(text),
+		ParseMode: "Markdown",
+	})
+	if err != nil {
+		return err
+	}
+	return g.post(ctx, "editMessageText", payload, nil)
+}
+
+// post performs one Telegram API call, decoding into out when supplied.
+func (g *gateway) post(
+	ctx context.Context,
+	method string,
+	payload []byte,
+	out any,
+) error {
+	url := fmt.Sprintf("%s/bot%s/%s", g.apiBase, g.botToken, method)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("telegram API returned %d", resp.StatusCode)
+	}
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func truncateForTelegram(text string) string {
+	if len(text) > telegramMaxLen {
+		return text[:telegramMaxLen-15] + "\n…[truncated]"
+	}
+	return text
 }
 
 func (g *gateway) GetUpdates(ctx context.Context, offset int64) ([]Update, error) {

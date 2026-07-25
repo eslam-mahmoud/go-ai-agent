@@ -153,7 +153,7 @@ Each tick advances the project exactly one step, which keeps the permanent invar
 | no backlog | initializes it (`auto_initialize`), otherwise idles |
 | no current task | runs an Engineering Manager review to select the next one |
 | task in flight | runs the sequential workflow: planner → developer → reviewer → fixer → verifier |
-| task terminal | runs the manager review, decides discoveries, publishes, selects the next task |
+| task terminal | runs the manager review, decides discoveries, runs the Architect when the review requires it, publishes, selects the next task |
 | budget exhausted | stops and records `budget.exhausted` |
 
 Mode outputs are written under `<workspace_dir>/.madar/executions/` and referenced from the `executions` table, which is how the developer reads the plan and the fixer reads the review across restarts.
@@ -177,10 +177,9 @@ Mode outputs are written under `<workspace_dir>/.madar/executions/` and referenc
 
 **Implemented and tested, but still not driven by the daemon**
 
-- **Architect mode** — the architecture documents it produces have a writer and a controller, but no store-backed loader supplies its context, so nothing runs the mode itself.
 - **The policy engine's command and write rules** — `policy.Engine` evaluates them correctly, but enforcement happens at the provider's tool-call boundary, which is not yet threaded through. The coarse per-mode sandbox (`read-only` for planning and review, `workspace-write` for delivery) *is* enforced today.
 
-Both are tracked on the [v2 tracker](https://github.com/eslam-mahmoud/go-ai-agent/issues/67).
+Tracked on the [v2 tracker](https://github.com/eslam-mahmoud/go-ai-agent/issues/67).
 
 ---
 

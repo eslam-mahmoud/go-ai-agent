@@ -109,7 +109,12 @@ func Build(dependencies Dependencies) (*Loop, error) {
 	if err != nil {
 		return nil, err
 	}
+	architect, err := buildArchitect(cfg, projectStore, dependencies.Engine, recorder, workspaceRoot)
+	if err != nil {
+		return nil, err
+	}
 	return assemble(assembly{
+		architect:     architect,
 		config:        cfg,
 		store:         projectStore,
 		projectID:     projectID,
@@ -249,6 +254,7 @@ func BuildWithRunners(
 	dependencies Dependencies,
 	runner workflow.ModeRunner,
 	manager project.ManagerRunner,
+	architect project.ArchitectRunner,
 ) (*Loop, error) {
 	cfg := dependencies.Config
 	if cfg == nil {
@@ -268,10 +274,55 @@ func BuildWithRunners(
 		projectID:     dependencies.ProjectID,
 		runner:        runner,
 		manager:       manager,
+		architect:     architect,
 		client:        dependencies.GitHub,
 		status:        dependencies.Status,
 		workspaceRoot: workspaceRoot,
 		log:           log,
+	})
+}
+
+// buildArchitect wires Architect mode to the store and workspace. It is
+// optional in the sense that a nil runner leaves the obligation recorded but
+// unacted on; the daemon always supplies one.
+func buildArchitect(
+	cfg *config.Config,
+	projectStore *store.Store,
+	provider engine.Engine,
+	recorder *execution.Recorder,
+	workspaceRoot string,
+) (project.ArchitectRunner, error) {
+	loader, err := mode.NewDurableArchitectProjectLoader(projectStore)
+	if err != nil {
+		return nil, err
+	}
+	runtime := mode.ArchitectRuntimeContextProviderFunc(func(
+		_ context.Context, projectID int64,
+	) (mode.ArchitectRuntimeContext, error) {
+		record, err := projectStore.GetProjectByID(projectID)
+		if err != nil {
+			return mode.ArchitectRuntimeContext{}, err
+		}
+		if record == nil {
+			return mode.ArchitectRuntimeContext{}, fmt.Errorf(
+				"%w: project %d not found", ErrInvalidLoop, projectID,
+			)
+		}
+		workDir, err := project.WorkspaceRootResolver{Root: workspaceRoot}.
+			ProjectWorkspace(record.Repo)
+		if err != nil {
+			return mode.ArchitectRuntimeContext{}, err
+		}
+		// Architecture is a project-level concern with no task to attribute
+		// an execution to, so nothing is recorded and the ID stays zero.
+		return mode.ArchitectRuntimeContext{WorkDir: workDir}, nil
+	})
+	contexts, err := mode.NewDurableArchitectContextProvider(loader, runtime)
+	if err != nil {
+		return nil, err
+	}
+	return mode.NewArchitect(provider, contexts, mode.ArchitectOptions{
+		Model: cfg.Claude.Model,
 	})
 }
 
@@ -282,6 +333,7 @@ type assembly struct {
 	projectID     int64
 	runner        workflow.ModeRunner
 	manager       project.ManagerRunner
+	architect     project.ArchitectRunner
 	client        GitHubClient
 	status        notify.StatusSender
 	workspaceRoot string
@@ -315,7 +367,16 @@ func assemble(parts assembly) (*Loop, error) {
 	if err != nil {
 		return nil, err
 	}
-	architecture, err := project.NewArchitectureController(projectStore)
+	// The architect writes documents into the workspace, so the controller is
+	// built with both the runner and the writer. Without them a manager review
+	// that requires architecture review would record the obligation and stop.
+	writer, err := project.NewWorkspaceArchitectureWriter(projectStore, parts.workspaceRoot)
+	if err != nil {
+		return nil, err
+	}
+	architecture, err := project.NewArchitectureControllerWithDocuments(
+		projectStore, parts.architect, writer,
+	)
 	if err != nil {
 		return nil, err
 	}

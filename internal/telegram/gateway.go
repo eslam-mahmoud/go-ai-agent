@@ -37,6 +37,9 @@ type Gateway interface {
 	GetUpdates(ctx context.Context, offset int64) ([]Update, error)
 	// Reply sends a message to a specific chat by its numeric ID.
 	Reply(ctx context.Context, chatID int64, text string) error
+	// Send broadcasts already-rendered text to every configured chat. It is
+	// the delivery half of the v2 notification router.
+	Send(ctx context.Context, text string) error
 }
 
 type gateway struct {
@@ -152,6 +155,12 @@ func (g *gateway) send(ctx context.Context, chatID, text string) error {
 		return fmt.Errorf("telegram API returned %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// Send broadcasts pre-rendered text. Callers own the wording; the gateway
+// owns delivery.
+func (g *gateway) Send(ctx context.Context, text string) error {
+	return g.broadcast(ctx, text)
 }
 
 func (g *gateway) GetUpdates(ctx context.Context, offset int64) ([]Update, error) {

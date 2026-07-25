@@ -47,7 +47,10 @@ func TestBuildArgs(t *testing.T) {
 		MaxTurns:  20,
 		Policy:    engine.Policy{SkipPermissions: true},
 	}
-	args := buildArgs(request, false)
+	args, err := buildArgs(request, false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, pair := range [][2]string{
 		{"-p", "do the thing"},
 		{"--output-format", "stream-json"},
@@ -63,10 +66,84 @@ func TestBuildArgs(t *testing.T) {
 
 	request.ResumeSessionID = "resume-session"
 	request.OutputSchema = json.RawMessage(`{"type":"object"}`)
-	resumeArgs := buildArgs(request, true)
+	resumeArgs, err := buildArgs(request, true)
+	if err != nil {
+		t.Fatal(err)
+	}
 	assertArgPair(t, resumeArgs, "--resume", "resume-session")
 	assertArgPair(t, resumeArgs, "--json-schema", `{"type":"object"}`)
 	assertNoArg(t, resumeArgs, "--session-id")
+}
+
+// A mode that declares read-only must be unable to mutate the workspace. The
+// adapter used to drop Sandbox entirely, so "read-only" was a label with no
+// effect while the identical mode was genuinely confined under Codex.
+func TestBuildArgsEnforcesTheDeclaredSandbox(t *testing.T) {
+	tests := []struct {
+		name        string
+		policy      engine.Policy
+		wantDenied  bool
+		wantMode    string
+		wantSkip    bool
+		wantRefusal bool
+	}{
+		{
+			name:       "read-only denies the write tools",
+			policy:     engine.Policy{Sandbox: "read-only", ApprovalPolicy: "never"},
+			wantDenied: true,
+			wantMode:   "acceptEdits",
+		},
+		{
+			name:     "workspace-write keeps them",
+			policy:   engine.Policy{Sandbox: "workspace-write", ApprovalPolicy: "never"},
+			wantMode: "acceptEdits",
+		},
+		{
+			name:   "no declared sandbox leaves the CLI defaults",
+			policy: engine.Policy{},
+		},
+		{
+			name:     "skip-permissions remains the only opt-out",
+			policy:   engine.Policy{Sandbox: "read-only", SkipPermissions: true},
+			wantSkip: true,
+		},
+		{
+			name:        "an unknown sandbox fails closed",
+			policy:      engine.Policy{Sandbox: "anything-goes"},
+			wantRefusal: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			args, err := buildArgs(engine.RunRequest{
+				Prompt: "do the thing", Policy: test.policy,
+			}, false)
+			if test.wantRefusal {
+				if err == nil {
+					t.Fatal("an unknown sandbox must be refused, not ignored")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.wantDenied {
+				assertArgPair(t, args, "--disallowedTools", "Bash,Edit,MultiEdit,NotebookEdit,Write")
+			} else {
+				assertNoArg(t, args, "--disallowedTools")
+			}
+			if test.wantMode != "" {
+				assertArgPair(t, args, "--permission-mode", test.wantMode)
+			} else {
+				assertNoArg(t, args, "--permission-mode")
+			}
+			if test.wantSkip {
+				assertArg(t, args, "--dangerously-skip-permissions")
+			} else {
+				assertNoArg(t, args, "--dangerously-skip-permissions")
+			}
+		})
+	}
 }
 
 func TestParseStreamNormalizesEventsResultAndUsage(t *testing.T) {

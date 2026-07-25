@@ -210,6 +210,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Recovery comes first: reconciling against state a crash left
+	// half-written would repair the wrong thing.
+	if err := projectloop.Recover(cfg, s, log); err != nil {
+		log.Error("v2 startup recovery failed", "err", err)
+		os.Exit(1)
+	}
+
 	// Reconcile before picking up work, so a restart repairs drift rather
 	// than building on it, then keep reconciling in the background.
 	if scheduler, err := project.NewReconcileScheduler(

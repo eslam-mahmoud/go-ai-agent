@@ -71,6 +71,13 @@ type BudgetGuard interface {
 	AppendWorkflowEvent(event *domain.WorkflowEvent) (*domain.WorkflowEvent, bool, error)
 }
 
+// PullRequestDiscoverer attaches a task's pull request once its branch has
+// one. Optional: without GitHub credentials a task's PR is only learned from
+// reconciliation.
+type PullRequestDiscoverer interface {
+	Discover(ctx context.Context, projectID int64) (*project.PullRequestDiscoveryResult, error)
+}
+
 // StatusPublisher keeps the owner's live status message current. It is
 // optional: a deployment without Telegram still delivers, silently.
 type StatusPublisher interface {
@@ -82,6 +89,8 @@ type Options struct {
 	// the loop expects a backlog to already exist.
 	Initializer Initializer
 	Status      StatusPublisher
+	// PullRequests attaches pull requests to the tasks that opened them.
+	PullRequests PullRequestDiscoverer
 	// Budgets bound one task's consumption. The zero value is unlimited.
 	Budgets policy.Budgets
 	// BudgetGuard supplies the execution history budgets are measured
@@ -95,15 +104,16 @@ type Options struct {
 // a loop that did several things per tick would be harder to reason about
 // after a restart.
 type Loop struct {
-	projectID   int64
-	controller  Controller
-	delivery    Delivery
-	reviewer    Reviewer
-	initializer Initializer
-	status      StatusPublisher
-	budgets     policy.Budgets
-	budgetGuard BudgetGuard
-	log         *slog.Logger
+	projectID    int64
+	controller   Controller
+	delivery     Delivery
+	reviewer     Reviewer
+	initializer  Initializer
+	status       StatusPublisher
+	pullRequests PullRequestDiscoverer
+	budgets      policy.Budgets
+	budgetGuard  BudgetGuard
+	log          *slog.Logger
 }
 
 func New(
@@ -128,15 +138,16 @@ func New(
 		log = slog.Default()
 	}
 	return &Loop{
-		projectID:   projectID,
-		controller:  controller,
-		delivery:    delivery,
-		reviewer:    reviewer,
-		initializer: options.Initializer,
-		status:      options.Status,
-		budgets:     options.Budgets,
-		budgetGuard: options.BudgetGuard,
-		log:         log,
+		projectID:    projectID,
+		controller:   controller,
+		delivery:     delivery,
+		reviewer:     reviewer,
+		initializer:  options.Initializer,
+		status:       options.Status,
+		pullRequests: options.PullRequests,
+		budgets:      options.Budgets,
+		budgetGuard:  options.BudgetGuard,
+		log:          log,
 	}, nil
 }
 
@@ -159,6 +170,9 @@ func (loop *Loop) Tick(ctx context.Context) (*Outcome, error) {
 	if snapshot.Project.State == domain.ProjectPaused {
 		return &Outcome{Action: ActionPaused, Detail: "project is paused"}, nil
 	}
+	// A task's pull request is discovered before anything reads it, so the
+	// verifier sees the PR that its own branch opened.
+	loop.discoverPullRequests(ctx)
 	if len(snapshot.Tasks) == 0 {
 		if loop.initializer == nil {
 			return &Outcome{
@@ -241,6 +255,19 @@ func (loop *Loop) Run(ctx context.Context, interval time.Duration) error {
 			return ctx.Err()
 		case <-ticker.C:
 		}
+	}
+}
+
+// discoverPullRequests attaches pull requests to their tasks. A GitHub
+// failure is logged, never returned: delivery must not stop because a lookup
+// was unavailable.
+func (loop *Loop) discoverPullRequests(ctx context.Context) {
+	if loop.pullRequests == nil {
+		return
+	}
+	if _, err := loop.pullRequests.Discover(ctx, loop.projectID); err != nil {
+		loop.log.Debug("pull request discovery failed",
+			"project", loop.projectID, "err", err)
 	}
 }
 

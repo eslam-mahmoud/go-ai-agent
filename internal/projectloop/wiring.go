@@ -32,6 +32,9 @@ type GitHubClient interface {
 	GetCheckSuiteStatus(
 		ctx context.Context, owner, repo, branch string,
 	) (githubclient.CheckStatus, error)
+	ListPullRequestsForBranch(
+		ctx context.Context, owner, repo, branch string,
+	) ([]*githubclient.PullRequest, error)
 }
 
 // Dependencies are the process-wide collaborators the loop is built from.
@@ -421,6 +424,13 @@ func assemble(parts assembly) (*Loop, error) {
 			MaxCIFixCycles:     cfg.Project.Budgets.MaxCIFixCycles,
 			MaxModeRetries:     cfg.Project.Budgets.MaxModeRetries,
 		},
+	}
+	if client != nil {
+		if options.PullRequests, err = project.NewPullRequestDiscoverer(
+			projectStore, client,
+		); err != nil {
+			return nil, err
+		}
 	}
 	if parts.status != nil {
 		if options.Status, err = notify.NewStatusPublisher(

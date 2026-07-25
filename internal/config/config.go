@@ -29,6 +29,7 @@ type Config struct {
 	Cleanup      CleanupConfig
 	Reconcile    ReconcileConfig
 	Project      ProjectConfig
+	Policy       PolicyConfig
 	GitHub       GitHubConfig
 	Telegram     TelegramConfig
 	DBPath       string
@@ -93,6 +94,17 @@ type ProjectConfig struct {
 	AutoInitialize bool
 	Interval       time.Duration
 	Budgets        BudgetConfig
+}
+
+// PolicyConfig is the deployment's safety policy. An absent block constrains
+// nothing, so upgrading without one behaves exactly as before.
+type PolicyConfig struct {
+	CommandDefault  string
+	CommandAllow    []string
+	CommandDeny     []string
+	WritablePaths   []string
+	DeniedPaths     []string
+	RequireApproval []string
 }
 
 // BudgetConfig bounds what one task may consume. Every zero means unlimited,
@@ -230,6 +242,18 @@ type rawConfig struct {
 			MaxModeRetries     int    `yaml:"max_mode_retries"`
 		} `yaml:"budgets"`
 	} `yaml:"project"`
+	Policy struct {
+		Commands struct {
+			Default string   `yaml:"default"`
+			Allow   []string `yaml:"allow"`
+			Deny    []string `yaml:"deny"`
+		} `yaml:"commands"`
+		Paths struct {
+			Writable []string `yaml:"writable"`
+			Deny     []string `yaml:"deny"`
+		} `yaml:"paths"`
+		RequireApproval []string `yaml:"require_approval"`
+	} `yaml:"policy"`
 	Telegram struct {
 		CommandMaxAgeStr     string `yaml:"command_max_age"`
 		RateWindowStr        string `yaml:"rate_window"`
@@ -392,6 +416,14 @@ func Load(configPath, envPath string) (*Config, error) {
 				MaxCIFixCycles:     raw.Project.Budgets.MaxCIFixCycles,
 				MaxModeRetries:     raw.Project.Budgets.MaxModeRetries,
 			},
+		},
+		Policy: PolicyConfig{
+			CommandDefault:  strings.TrimSpace(raw.Policy.Commands.Default),
+			CommandAllow:    raw.Policy.Commands.Allow,
+			CommandDeny:     raw.Policy.Commands.Deny,
+			WritablePaths:   raw.Policy.Paths.Writable,
+			DeniedPaths:     raw.Policy.Paths.Deny,
+			RequireApproval: raw.Policy.RequireApproval,
 		},
 		Reconcile: ReconcileConfig{
 			Interval:  reconcileInterval,

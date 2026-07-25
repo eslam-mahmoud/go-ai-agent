@@ -135,7 +135,21 @@ func main() {
 	defer s.Close()
 
 	ghClient := githubclient.New(cfg.GitHub.Token)
-	engineRegistry, err := engine.NewRegistry(claudeengine.New(cfg.Claude.Bin))
+	// The safety policy is deployment-wide, so it is applied at the engine
+	// rather than by each mode: one place to get right instead of seven.
+	toolRules, err := projectloop.BuildToolRules(cfg)
+	if err != nil {
+		log.Error("invalid safety policy", "err", err)
+		os.Exit(1)
+	}
+	if !toolRules.Empty() {
+		log.Info("safety policy loaded",
+			"allow", len(toolRules.Allow),
+			"ask", len(toolRules.Ask),
+			"deny", len(toolRules.Deny))
+	}
+	provider := claudeengine.NewWithToolRules(cfg.Claude.Bin, toolRules)
+	engineRegistry, err := engine.NewRegistry(provider)
 	if err != nil {
 		log.Error("failed to initialize engine registry", "err", err)
 		os.Exit(1)
@@ -249,7 +263,7 @@ func main() {
 	dependencies := projectloop.Dependencies{
 		Config: cfg,
 		Store:  s,
-		Engine: claudeengine.New(cfg.Claude.Bin),
+		Engine: provider,
 		Log:    log,
 	}
 	if cfg.GitHub.Token != "" {

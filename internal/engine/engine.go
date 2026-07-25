@@ -12,6 +12,23 @@ type Policy struct {
 	Sandbox         string
 	ApprovalPolicy  string
 	SkipPermissions bool
+	// ToolRules are provider-neutral tool-permission patterns handed to the
+	// provider, so a denied command or write is refused where the tool call
+	// happens rather than noticed by us afterwards.
+	ToolRules ToolRules
+}
+
+// ToolRules mirrors policy.ToolRules without the engine package depending on
+// the policy package, keeping the provider boundary free of policy types.
+type ToolRules struct {
+	Allow []string
+	Ask   []string
+	Deny  []string
+}
+
+// Empty reports that these rules constrain nothing.
+func (rules ToolRules) Empty() bool {
+	return len(rules.Allow) == 0 && len(rules.Ask) == 0 && len(rules.Deny) == 0
 }
 
 // RunRequest is the complete input for a provider execution or resume.

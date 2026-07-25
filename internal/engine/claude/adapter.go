@@ -25,6 +25,8 @@ const (
 
 type Adapter struct {
 	binary string
+	// toolRules are the deployment-wide safety rules applied to every run.
+	toolRules engine.ToolRules
 }
 
 var _ engine.Engine = (*Adapter)(nil)
@@ -34,6 +36,18 @@ func New(binary string) *Adapter {
 		binary = defaultBinary
 	}
 	return &Adapter{binary: binary}
+}
+
+// NewWithToolRules returns an adapter that applies the deployment's safety
+// rules to every run.
+//
+// The rules live on the adapter rather than being threaded through each mode
+// because safety policy is process-wide: seven mode constructors each having
+// to remember to apply it is seven chances to forget.
+func NewWithToolRules(binary string, rules engine.ToolRules) *Adapter {
+	adapter := New(binary)
+	adapter.toolRules = rules
+	return adapter
 }
 
 func (a *Adapter) Name() string {
@@ -117,6 +131,9 @@ func (a *Adapter) run(
 		return nil, contextExecutionError("start", err, "")
 	}
 
+	// A mode may tighten the deployment's rules but never loosen them, so the
+	// base rules are merged in rather than overridden.
+	request.Policy.ToolRules = mergeToolRules(a.toolRules, request.Policy.ToolRules)
 	args, err := buildArgs(request, resume)
 	if err != nil {
 		return nil, engine.NewExecutionError(
@@ -319,7 +336,49 @@ func policyArgs(policy engine.Policy) ([]string, error) {
 	if policy.ApprovalPolicy != "" {
 		args = append(args, "--permission-mode", permissionMode(policy.ApprovalPolicy))
 	}
+	settings, err := permissionSettings(policy.ToolRules)
+	if err != nil {
+		return nil, err
+	}
+	if settings != "" {
+		args = append(args, "--settings", settings)
+	}
 	return args, nil
+}
+
+// mergeToolRules combines the adapter's base rules with a request's own.
+// Deny wins by construction: both sets of denials survive, so a permissive
+// request cannot undo a deployment-wide refusal.
+func mergeToolRules(base, request engine.ToolRules) engine.ToolRules {
+	return engine.ToolRules{
+		Allow: append(append([]string(nil), base.Allow...), request.Allow...),
+		Ask:   append(append([]string(nil), base.Ask...), request.Ask...),
+		Deny:  append(append([]string(nil), base.Deny...), request.Deny...),
+	}
+}
+
+// permissionSettings renders the policy's tool rules into the CLI's own
+// permission settings, so the provider refuses a denied command or write at
+// the moment of the tool call. Checking afterwards would mean checking after
+// the file was already written.
+//
+// An empty ruleset produces no setting at all, so a deployment with no
+// policy: block behaves exactly as it did before.
+func permissionSettings(rules engine.ToolRules) (string, error) {
+	if rules.Empty() {
+		return "", nil
+	}
+	encoded, err := json.Marshal(map[string]any{
+		"permissions": map[string]any{
+			"allow": rules.Allow,
+			"ask":   rules.Ask,
+			"deny":  rules.Deny,
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("encode permission settings: %w", err)
+	}
+	return string(encoded), nil
 }
 
 // permissionMode maps the provider-neutral approval policy onto Claude's own

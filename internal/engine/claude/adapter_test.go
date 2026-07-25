@@ -591,3 +591,94 @@ func readFile(t *testing.T, path string) string {
 	}
 	return string(content)
 }
+
+// A denied command must be refused by the provider at the moment of the tool
+// call. Checking after the fact would mean checking after the command ran.
+func TestBuildArgsHandsToolRulesToTheProvider(t *testing.T) {
+	args, err := buildArgs(engine.RunRequest{
+		Prompt: "do the thing",
+		Policy: engine.Policy{
+			Sandbox: "workspace-write",
+			ToolRules: engine.ToolRules{
+				Allow: []string{"Bash(go test ./...)"},
+				Deny:  []string{"Write(.env)"},
+			},
+		},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := argValue(args, "--settings")
+	if settings == "" {
+		t.Fatalf("no --settings in %v", args)
+	}
+	var decoded struct {
+		Permissions struct {
+			Allow []string `json:"allow"`
+			Ask   []string `json:"ask"`
+			Deny  []string `json:"deny"`
+		} `json:"permissions"`
+	}
+	if err := json.Unmarshal([]byte(settings), &decoded); err != nil {
+		t.Fatalf("settings %q: %v", settings, err)
+	}
+	if len(decoded.Permissions.Allow) != 1 || decoded.Permissions.Allow[0] != "Bash(go test ./...)" {
+		t.Fatalf("allow = %v", decoded.Permissions.Allow)
+	}
+	if len(decoded.Permissions.Deny) != 1 || decoded.Permissions.Deny[0] != "Write(.env)" {
+		t.Fatalf("deny = %v", decoded.Permissions.Deny)
+	}
+}
+
+// A deployment with no policy block must behave exactly as it did before.
+func TestBuildArgsOmitsSettingsWithoutToolRules(t *testing.T) {
+	args, err := buildArgs(engine.RunRequest{
+		Prompt: "do the thing",
+		Policy: engine.Policy{Sandbox: "read-only"},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNoArg(t, args, "--settings")
+}
+
+// A request may tighten the deployment's rules but never loosen them, so both
+// sets of denials have to survive the merge.
+func TestAdapterMergesItsBaseRulesIntoEveryRun(t *testing.T) {
+	merged := mergeToolRules(
+		engine.ToolRules{Deny: []string{"Bash(rm -rf /)"}},
+		engine.ToolRules{Deny: []string{"Write(.env)"}, Allow: []string{"Bash(ls)"}},
+	)
+	if len(merged.Deny) != 2 {
+		t.Fatalf("deny = %v, want both denials to survive", merged.Deny)
+	}
+	if len(merged.Allow) != 1 {
+		t.Fatalf("allow = %v", merged.Allow)
+	}
+}
+
+// The sandbox is a separate control: policy rules must not be able to hand a
+// read-only mode the tools it is forbidden.
+func TestToolRulesDoNotWeakenTheSandbox(t *testing.T) {
+	args, err := buildArgs(engine.RunRequest{
+		Prompt: "do the thing",
+		Policy: engine.Policy{
+			Sandbox:   "read-only",
+			ToolRules: engine.ToolRules{Allow: []string{"Write(**)"}},
+		},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertArgPair(t, args, "--disallowedTools", "Bash,Edit,MultiEdit,NotebookEdit,Write")
+}
+
+// argValue returns the value following a flag, or "" when it is absent.
+func argValue(args []string, flag string) string {
+	for index, arg := range args {
+		if arg == flag && index+1 < len(args) {
+			return args[index+1]
+		}
+	}
+	return ""
+}

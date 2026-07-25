@@ -630,6 +630,36 @@ func TestBuildArgsHandsToolRulesToTheProvider(t *testing.T) {
 	}
 }
 
+// A permission control must not depend on the CLI tolerating a null where an
+// array belongs: a rejected or ignored settings block would lose the deny
+// rules while the daemon still reported them loaded.
+func TestPermissionSettingsOmitEmptyLists(t *testing.T) {
+	args, err := buildArgs(engine.RunRequest{
+		Prompt: "do the thing",
+		Policy: engine.Policy{
+			ToolRules: engine.ToolRules{Deny: []string{"Write(.env)"}},
+		},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := argValue(args, "--settings")
+	if strings.Contains(settings, "null") {
+		t.Fatalf("settings %q must not contain a null list", settings)
+	}
+	var decoded map[string]map[string][]string
+	if err := json.Unmarshal([]byte(settings), &decoded); err != nil {
+		t.Fatalf("settings %q: %v", settings, err)
+	}
+	permissions := decoded["permissions"]
+	if len(permissions) != 1 {
+		t.Fatalf("permissions = %v, want only the populated category", permissions)
+	}
+	if len(permissions["deny"]) != 1 {
+		t.Fatalf("deny = %v", permissions["deny"])
+	}
+}
+
 // A deployment with no policy block must behave exactly as it did before.
 func TestBuildArgsOmitsSettingsWithoutToolRules(t *testing.T) {
 	args, err := buildArgs(engine.RunRequest{

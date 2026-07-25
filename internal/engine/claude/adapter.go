@@ -368,13 +368,21 @@ func permissionSettings(rules engine.ToolRules) (string, error) {
 	if rules.Empty() {
 		return "", nil
 	}
-	encoded, err := json.Marshal(map[string]any{
-		"permissions": map[string]any{
-			"allow": rules.Allow,
-			"ask":   rules.Ask,
-			"deny":  rules.Deny,
-		},
-	})
+	// Empty lists are omitted rather than encoded as null. Whether the CLI
+	// tolerates a null where an array belongs is not something a permission
+	// control should depend on: if the block were rejected or ignored, the
+	// deny rules would be lost while the daemon still reported them loaded.
+	permissions := map[string]any{}
+	for key, patterns := range map[string][]string{
+		"allow": rules.Allow,
+		"ask":   rules.Ask,
+		"deny":  rules.Deny,
+	} {
+		if len(patterns) > 0 {
+			permissions[key] = patterns
+		}
+	}
+	encoded, err := json.Marshal(map[string]any{"permissions": permissions})
 	if err != nil {
 		return "", fmt.Errorf("encode permission settings: %w", err)
 	}

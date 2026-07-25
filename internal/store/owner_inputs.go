@@ -156,3 +156,56 @@ func scanOwnerInput(row scanner) (*OwnerInput, error) {
 	input.CreatedAt = input.CreatedAt.UTC()
 	return &input, nil
 }
+
+// RecordCommandRefusal persists a refused command attempt. Repeated
+// unauthorized attempts are worth noticing, so they are kept rather than only
+// refused in the moment.
+func (s *Store) RecordCommandRefusal(userID int64, command, reason string) error {
+	if _, err := s.db.Exec(`
+		INSERT INTO command_refusals (user_id, command, reason, created_at)
+		VALUES (?, ?, ?, ?)
+	`, userID, strings.TrimSpace(command), strings.TrimSpace(reason), time.Now().UTC()); err != nil {
+		return fmt.Errorf("record command refusal: %w", err)
+	}
+	return nil
+}
+
+// CommandRefusal is one recorded refusal.
+type CommandRefusal struct {
+	ID        int64
+	UserID    int64
+	Command   string
+	Reason    string
+	CreatedAt time.Time
+}
+
+// ListCommandRefusals returns recent refusals, newest first.
+func (s *Store) ListCommandRefusals(limit int) ([]*CommandRefusal, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.db.Query(`
+		SELECT id, user_id, command, reason, created_at
+		FROM command_refusals ORDER BY id DESC LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list command refusals: %w", err)
+	}
+	defer rows.Close()
+	var refusals []*CommandRefusal
+	for rows.Next() {
+		var refusal CommandRefusal
+		if err := rows.Scan(
+			&refusal.ID,
+			&refusal.UserID,
+			&refusal.Command,
+			&refusal.Reason,
+			&refusal.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan command refusal: %w", err)
+		}
+		refusal.CreatedAt = refusal.CreatedAt.UTC()
+		refusals = append(refusals, &refusal)
+	}
+	return refusals, rows.Err()
+}

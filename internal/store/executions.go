@@ -315,3 +315,29 @@ func nullTimePointer(value sql.NullTime) *time.Time {
 	copy := value.Time.UTC()
 	return &copy
 }
+
+// ListProjectExecutions returns every execution for a project in order. It
+// backs metrics, which must be derived from stored state rather than counted
+// in memory.
+func (s *Store) ListProjectExecutions(projectID int64) ([]*domain.Execution, error) {
+	if projectID <= 0 {
+		return nil, fmt.Errorf("%w: project ID must be positive", domain.ErrInvalidExecution)
+	}
+	rows, err := s.db.Query(
+		executionSelect+` WHERE project_id = ? ORDER BY id ASC`,
+		projectID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list project executions: %w", err)
+	}
+	defer rows.Close()
+	var executions []*domain.Execution
+	for rows.Next() {
+		execution, err := scanExecution(rows)
+		if err != nil {
+			return nil, err
+		}
+		executions = append(executions, execution)
+	}
+	return executions, rows.Err()
+}

@@ -12,14 +12,11 @@ import (
 // Recover repairs v2 state left behind by a restart, before anything reads
 // it. It runs ahead of reconciliation and ahead of the first delivery tick, so
 // the loop never builds on state a crash left half-written.
-//
-// Like Build it is a no-op when project mode is off, so the daemon can call it
-// unconditionally.
 func Recover(
 	cfg *config.Config, projectStore *store.Store, log *slog.Logger,
 ) error {
-	if cfg == nil || !cfg.Project.Enabled {
-		return nil
+	if cfg == nil {
+		return fmt.Errorf("%w: config is required for recovery", ErrInvalidLoop)
 	}
 	if projectStore == nil {
 		return fmt.Errorf("%w: store is required for recovery", ErrInvalidLoop)

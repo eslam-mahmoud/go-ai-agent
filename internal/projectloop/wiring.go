@@ -55,12 +55,10 @@ type Dependencies struct {
 // constructing a dozen collaborators inline, where a missing one would go
 // unnoticed until production. That is exactly how the v2 stack came to be
 // fully implemented and never executed.
-//
-// A nil loop with a nil error means v2 is not enabled, which is the default.
 func Build(dependencies Dependencies) (*Loop, error) {
 	cfg := dependencies.Config
-	if cfg == nil || !cfg.Project.Enabled {
-		return nil, nil
+	if cfg == nil {
+		return nil, fmt.Errorf("%w: config is required", ErrInvalidLoop)
 	}
 	projectStore := dependencies.Store
 	switch {

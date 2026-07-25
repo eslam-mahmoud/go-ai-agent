@@ -12,7 +12,6 @@ import (
 
 func projectModeConfig(workspaceRoot string) *config.Config {
 	cfg := &config.Config{WorkspaceDir: workspaceRoot}
-	cfg.Project.Enabled = true
 	cfg.Project.Repo = "owner/repo"
 	return cfg
 }

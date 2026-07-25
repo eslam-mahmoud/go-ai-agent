@@ -9,22 +9,29 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sort"
 	"syscall"
 	"time"
 
 	"github.com/eslam-mahmoud/go-ai-agent/internal/app"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/config"
+	"github.com/eslam-mahmoud/go-ai-agent/internal/domain"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/engine"
 	claudeengine "github.com/eslam-mahmoud/go-ai-agent/internal/engine/claude"
 	githubclient "github.com/eslam-mahmoud/go-ai-agent/internal/github"
-	"github.com/eslam-mahmoud/go-ai-agent/internal/orchestrator"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/project"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/projectcli"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/projectloop"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/store"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/telegram"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/updater"
+	"github.com/eslam-mahmoud/go-ai-agent/internal/workspace"
 )
+
+// commandPollInterval is how often Telegram is polled for owner commands.
+// It is fixed rather than configurable: it governs chat responsiveness, not
+// delivery, and the delivery cadence already has its own setting.
+const commandPollInterval = 5 * time.Second
 
 // Build-time variables injected via -ldflags.
 var (
@@ -108,6 +115,15 @@ func main() {
 		return
 	}
 
+	// The daemon delivers exactly one project, so it cannot start without
+	// knowing which. The CLI subcommands take --repo explicitly and do not
+	// need this, which is why the check lives here rather than in Load.
+	if cfg.Project.Repo == "" {
+		log.Error("project.repo is required to run the daemon",
+			"hint", "set project.repo in config.yaml, then run `madar project create --repo <owner/name>`")
+		os.Exit(1)
+	}
+
 	instanceLock, err := app.AcquireInstanceLock(cfg.DBPath)
 	if err != nil {
 		if errors.Is(err, app.ErrAlreadyLocked) {
@@ -149,71 +165,44 @@ func main() {
 			"deny", len(toolRules.Deny))
 	}
 	provider := claudeengine.NewWithToolRules(cfg.Claude.Bin, toolRules)
-	engineRegistry, err := engine.NewRegistry(provider)
-	if err != nil {
+	// Registering the provider validates it before anything tries to run a
+	// mode through it.
+	if _, err := engine.NewRegistry(provider); err != nil {
 		log.Error("failed to initialize engine registry", "err", err)
 		os.Exit(1)
 	}
 	tg := telegram.New(cfg.Telegram.BotToken, cfg.Telegram.AllowedIDs)
 
-	loop, err := orchestrator.New(
-		cfg,
-		ghClient,
-		engineRegistry,
-		"claude",
-		cfg.Claude.Model,
-		tg,
-		s,
-		log,
-	)
-	if err != nil {
-		log.Error("failed to initialize orchestrator", "err", err)
-		os.Exit(1)
-	}
-	loop.SetCurrentVersion(Version)
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	log.Info("madar ready", "version", Version, "repos", cfg.RepoNames(), "db", cfg.DBPath)
+	log.Info("madar ready",
+		"version", Version, "repo", cfg.Project.Repo, "db", cfg.DBPath)
 	log.Debug("effective config",
-		"poll_interval", cfg.PollInterval,
-		"max_parallel", cfg.Concurrency.MaxParallel,
+		"interval", cfg.Project.Interval,
+		"auto_initialize", cfg.Project.AutoInitialize,
 		"ci_enabled", cfg.CI.Enabled,
 		"claude_bin", claudeBin,
 		"skip_permissions", cfg.Claude.SkipPermissions)
 
-	// Ensure required labels exist on every configured repo. This catches
-	// misconfigured label names early and bootstraps fresh repos.
-	requiredLabels := map[string]string{
-		cfg.Labels.Ready:            "0075ca",
-		cfg.Labels.InProgress:       "e4e669",
-		cfg.Labels.AwaitingFeedback: "d93f0b",
-		cfg.Labels.Done:             "0e8a16",
+	// The checkout has to exist before any mode runs in it.
+	checkout, err := workspace.New(
+		cfg.WorkspaceDir, cfg.Project.Repo, cfg.GitHub.Token, log,
+	)
+	if err != nil {
+		log.Error("invalid workspace configuration", "err", err)
+		os.Exit(1)
 	}
-	for _, repoCfg := range cfg.Repos {
-		fullRepo := repoCfg.Name
-		owner, repo, err := githubclient.SplitRepo(fullRepo)
-		if err != nil {
-			log.Warn("invalid repo, skipping label check", "repo", fullRepo)
-			continue
-		}
-		if err := ghClient.EnsureLabels(ctx, owner, repo, requiredLabels); err != nil {
-			log.Warn("label setup failed", "repo", fullRepo, "err", err)
-		} else {
-			log.Debug("labels verified", "repo", fullRepo)
-		}
-	}
-
-	if err := orchestrator.EnsureWorkspaces(ctx, cfg, log); err != nil {
+	if err := checkout.Ensure(ctx); err != nil {
 		log.Error("workspace setup failed", "err", err)
 		os.Exit(1)
 	}
+	checkout.Refresh(ctx)
 
 	// Recovery comes first: reconciling against state a crash left
 	// half-written would repair the wrong thing.
 	if err := projectloop.Recover(cfg, s, log); err != nil {
-		log.Error("v2 startup recovery failed", "err", err)
+		log.Error("startup recovery failed", "err", err)
 		os.Exit(1)
 	}
 
@@ -252,16 +241,24 @@ func main() {
 		}
 	}
 
-	// The owner command surface shares the v1 Telegram poller, so project
-	// commands work the moment project mode is on.
+	// One Telegram poller, owned here. Telegram hands each update to whoever
+	// asks first, so a second one would steal messages from this one.
 	if router, err := projectloop.BuildCommands(cfg, s); err != nil {
-		log.Error("v2 command surface failed to start", "err", err)
+		log.Error("command surface failed to start", "err", err)
 		os.Exit(1)
-	} else if router != nil {
-		loop.SetProjectCommands(router)
-		log.Info("v2 command surface enabled")
-	} else if cfg.Project.Enabled {
-		log.Warn("v2 commands disabled: telegram.allowed_ids is empty")
+	} else if router == nil {
+		log.Warn("owner commands disabled: telegram.allowed_ids is empty")
+	} else if commands, err := projectloop.NewCommandLoop(tg, router, log); err != nil {
+		log.Error("command loop failed to start", "err", err)
+		os.Exit(1)
+	} else {
+		log.Info("owner commands enabled")
+		go func() {
+			if err := commands.Run(ctx, commandPollInterval); err != nil &&
+				!errors.Is(err, context.Canceled) {
+				log.Error("command loop exited", "err", err)
+			}
+		}()
 	}
 
 	// Optional stages are passed only when their credentials exist, so the
@@ -280,24 +277,18 @@ func main() {
 		dependencies.Status = tg
 	}
 
-	// Delivery starts only after recovery and reconciliation, so v2 never
+	// Delivery starts only after recovery and reconciliation, so it never
 	// builds on state a restart has not yet repaired.
-	if delivery, err := projectloop.Build(dependencies); err != nil {
-		log.Error("v2 project mode failed to start", "err", err)
+	delivery, err := projectloop.Build(dependencies)
+	if err != nil {
+		log.Error("project mode failed to start", "err", err)
 		os.Exit(1)
-	} else if delivery != nil {
-		log.Info("v2 project mode enabled",
-			"repo", cfg.Project.Repo, "interval", cfg.Project.Interval)
-		go func() {
-			if err := delivery.Run(ctx, cfg.Project.Interval); err != nil &&
-				!errors.Is(err, context.Canceled) {
-				log.Error("v2 delivery loop exited", "err", err)
-			}
-		}()
 	}
-
-	if err := loop.Run(ctx); err != nil && err != context.Canceled {
-		log.Error("loop exited", "err", err)
+	log.Info("delivery loop starting",
+		"repo", cfg.Project.Repo, "interval", cfg.Project.Interval)
+	if err := delivery.Run(ctx, cfg.Project.Interval); err != nil &&
+		!errors.Is(err, context.Canceled) {
+		log.Error("delivery loop exited", "err", err)
 		os.Exit(1)
 	}
 	log.Info("madar stopped")
@@ -327,59 +318,73 @@ func runUpdate(currentVersion string) {
 	fmt.Printf("done.\nUpdated to %s. Restart madar to use the new version.\n", rel.Version)
 }
 
+// printStatus reports the managed project rather than a task queue: with v1
+// issue mode gone there is one project, one backlog, and one task in the lane.
 func printStatus(s *store.Store, cfg *config.Config) {
-	v, _ := s.SchemaVersion()
-	active, _ := s.CountActive()
-	inProgress, _ := s.ListByState(store.StateInProgress)
-	interrupted, _ := s.ListByState(store.StateInterrupted)
-	recovering, _ := s.ListByState(store.StateRecovering)
-	waiting, _ := s.ListByState(store.StateAwaitingFeedback)
-	ciWaiting, _ := s.ListByCIState(store.CIStateWaiting)
-
+	version, _ := s.SchemaVersion()
 	fmt.Printf("madar status\n")
-	fmt.Printf("  schema version : %d\n", v)
+	fmt.Printf("  schema version : %d\n", version)
 	fmt.Printf("  db             : %s\n", cfg.DBPath)
-	fmt.Printf("  repos          : %v\n", cfg.RepoNames())
-	fmt.Printf("  active runs    : %d\n", active)
-	fmt.Printf("  in-progress    : %d\n", len(inProgress))
-	for _, t := range inProgress {
-		printTaskExecution(t)
-	}
-	fmt.Printf("  interrupted   : %d\n", len(interrupted))
-	for _, t := range interrupted {
-		printTaskExecution(t)
-	}
-	fmt.Printf("  recovering    : %d\n", len(recovering))
-	for _, t := range recovering {
-		printTaskExecution(t)
-	}
-	fmt.Printf("  awaiting-feedback: %d\n", len(waiting))
-	for _, t := range waiting {
-		printTaskExecution(t)
-	}
-	fmt.Printf("  ci-watching    : %d\n", len(ciWaiting))
-	for _, t := range ciWaiting {
-		fmt.Printf(
-			"    #%d %s (engine %s, model %s, session %s, pr %d)\n",
-			t.IssueNumber,
-			t.Repo,
-			displayEngine(t.Engine),
-			displayModel(t.Model),
-			t.SessionID,
-			t.PRNumber,
-		)
-	}
-}
+	fmt.Printf("  repo           : %s\n", cfg.Project.Repo)
 
-func printTaskExecution(t *store.Task) {
-	fmt.Printf(
-		"    #%d %s (engine %s, model %s, session %s)\n",
-		t.IssueNumber,
-		t.Repo,
-		displayEngine(t.Engine),
-		displayModel(t.Model),
-		t.SessionID,
-	)
+	record, err := s.GetProjectByRepo(cfg.Project.Repo)
+	if err != nil {
+		fmt.Printf("  project        : unreadable (%v)\n", err)
+		return
+	}
+	if record == nil {
+		fmt.Printf("  project        : none — run `madar project create`\n")
+		return
+	}
+	fmt.Printf("  project        : %s (%s, health %s)\n",
+		record.Name, record.State, record.Health)
+
+	tasks, err := s.ListProjectTasks(record.ID)
+	if err != nil {
+		fmt.Printf("  backlog        : unreadable (%v)\n", err)
+		return
+	}
+	counts := map[domain.TaskStatus]int{}
+	for _, task := range tasks {
+		counts[task.Status]++
+	}
+	fmt.Printf("  backlog        : %d task(s)\n", len(tasks))
+	// Sorted so two runs of -status can be diffed against each other.
+	statuses := make([]string, 0, len(counts))
+	for status := range counts {
+		statuses = append(statuses, string(status))
+	}
+	sort.Strings(statuses)
+	for _, status := range statuses {
+		fmt.Printf("    %-16s %d\n", status, counts[domain.TaskStatus(status)])
+	}
+
+	if record.CurrentTaskID == nil {
+		fmt.Printf("  current task   : none\n")
+		return
+	}
+	current, err := s.GetProjectTaskByID(*record.CurrentTaskID)
+	if err != nil || current == nil {
+		fmt.Printf("  current task   : #%d (unreadable)\n", *record.CurrentTaskID)
+		return
+	}
+	fmt.Printf("  current task   : #%d %s (%s)\n",
+		current.ID, current.Title, current.Status)
+	if current.IssueNumber > 0 {
+		fmt.Printf("    issue        : #%d\n", current.IssueNumber)
+	}
+	if current.BranchName != "" {
+		fmt.Printf("    branch       : %s\n", current.BranchName)
+	}
+	if current.PRNumber > 0 {
+		fmt.Printf("    pull request : #%d\n", current.PRNumber)
+	}
+	execution, err := s.GetLatestTaskExecution(current.ID)
+	if err == nil && execution != nil {
+		fmt.Printf("    last run     : %s %s (engine %s, model %s)\n",
+			execution.Mode, execution.Status,
+			displayEngine(execution.Engine), displayModel(execution.Model))
+	}
 }
 
 func displayEngine(name string) string {

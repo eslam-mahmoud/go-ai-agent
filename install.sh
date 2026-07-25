@@ -311,6 +311,37 @@ install_binary() {
 
     step_done binary
     success "Madar binary installed at $BIN_PATH"
+    link_binary_onto_path
+}
+
+# link_binary_onto_path makes `madar` runnable by name. Without it every
+# command is a full path, and since the binary also discovers its own config,
+# this is what turns `/opt/madar/madar -config /opt/madar/config.yaml -status`
+# into `madar -status`.
+link_binary_onto_path() {
+    local target=""
+    for candidate in /usr/local/bin /usr/bin; do
+        if [[ -d "$candidate" ]]; then
+            target="$candidate/madar"
+            break
+        fi
+    done
+    if [[ -z "$target" ]]; then
+        warn "No directory on PATH to link into; run Madar as $BIN_PATH"
+        return
+    fi
+    if [[ -e "$target" && ! -L "$target" ]]; then
+        # Something that is not our symlink is already there. Replacing it
+        # would be destroying a file we did not create.
+        warn "$target exists and is not a symlink — leaving it alone"
+        warn "Run Madar as $BIN_PATH, or link it yourself"
+        return
+    fi
+    if run_privileged ln -sf "$BIN_PATH" "$target"; then
+        success "Linked $target → $BIN_PATH — run it as: madar -status"
+    else
+        warn "Could not link into $target; run Madar as $BIN_PATH"
+    fi
 }
 
 # ── step: credentials ─────────────────────────────────────────────────────────
@@ -505,15 +536,14 @@ EOF
     # refuses to start, so this is part of installing rather than a later step
     # the user has to discover.
     info "Creating the project…"
-    if "$BIN_PATH" project create \
-        -config "$CONFIG_PATH" -env "$ENV_PATH" \
+    if MADAR_CONFIG="$CONFIG_PATH" "$BIN_PATH" project create \
         --repo "$repo" --name "$project_name" --goal "$project_goal"; then
         success "Project created"
     else
         warn "Could not create the project automatically."
         warn "Run this once the credentials are right:"
-        echo "   $BIN_PATH project create -config $CONFIG_PATH -env $ENV_PATH \\"
-        echo "     --repo $repo --name '$project_name' --goal '$project_goal'"
+        echo "   madar project create --repo $repo \\"
+        echo "     --name '$project_name' --goal '$project_goal'"
     fi
 
     state_set project_repo "$repo"
@@ -633,6 +663,12 @@ uninstall() {
         launchctl unload "$plist" 2>/dev/null || true
         rm -f "$plist"
     fi
+    for candidate in /usr/local/bin/madar /usr/bin/madar; do
+        if [[ -L "$candidate" ]]; then
+            run_privileged rm -f "$candidate"
+            success "Removed $candidate"
+        fi
+    done
     echo ""
     success "Service removed and stopped"
     echo ""

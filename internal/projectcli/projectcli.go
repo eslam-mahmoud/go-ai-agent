@@ -551,8 +551,10 @@ func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 
 func addConfigFlags(fs *flag.FlagSet) *configFlags {
 	values := &configFlags{}
-	fs.StringVar(&values.configPath, "config", "config.yaml", "path to config.yaml")
-	fs.StringVar(&values.envPath, "env", ".env", "path to .env file")
+	fs.StringVar(&values.configPath, "config", "",
+		"path to config.yaml (default: discovered)")
+	fs.StringVar(&values.envPath, "env", "",
+		"path to the .env file (default: beside the config that was found)")
 	return values
 }
 
@@ -588,8 +590,17 @@ func openStore(flags *configFlags) (*store.Store, error) {
 	return store.Open(cfg.DBPath)
 }
 
+// loadConfig resolves the configuration the same way the daemon does, so a
+// subcommand run from any directory finds the same files the daemon would.
 func loadConfig(flags *configFlags) (*config.Config, error) {
-	return config.Load(flags.configPath, flags.envPath)
+	discovery := config.DiscoverConfig(flags.configPath)
+	if discovery.ConfigPath == "" {
+		return nil, discovery.NotFoundError()
+	}
+	return config.Load(
+		discovery.ConfigPath,
+		config.ResolveEnv(flags.envPath, discovery.ConfigPath),
+	)
 }
 
 func requireProject(s *store.Store, repo string) (*domain.Project, error) {

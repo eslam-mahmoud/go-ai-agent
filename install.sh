@@ -470,6 +470,20 @@ cleanup:
   audit_log_retention: 720h
   task_retention: 2160h
 
+# v2: GitHub reconciliation. Runs once at startup and then on this interval.
+# Set interval to 0 to run only the startup pass.
+reconcile:
+  interval: 15m
+  on_startup: true
+
+# v2: bounds on owner commands. Only the Telegram IDs in TELEGRAM_ALLOWED_IDS
+# may issue them; these limits apply on top of that.
+telegram:
+  command_max_age: 10m
+  rate_window: 1m
+  max_commands_per_window: 20
+  max_control_per_window: 5
+
 db_path: $MADAR_HOME/madar.db
 workspace_dir: $MADAR_HOME/workspaces
 EOF

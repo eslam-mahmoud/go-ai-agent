@@ -91,8 +91,10 @@ func (recorder *Recorder) Begin(
 	if projectID <= 0 {
 		return nil, fmt.Errorf("%w: project ID must be positive", ErrInvalidExecution)
 	}
-	if taskID < 0 {
-		return nil, fmt.Errorf("%w: task ID cannot be negative", ErrInvalidExecution)
+	if taskID <= 0 {
+		// Executions are keyed by task, so there is nothing to attribute a
+		// taskless run to. Callers that have no task record nothing.
+		return nil, fmt.Errorf("%w: task ID must be positive", ErrInvalidExecution)
 	}
 	if strings.TrimSpace(mode) == "" {
 		return nil, fmt.Errorf("%w: mode is required", ErrInvalidExecution)

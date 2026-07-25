@@ -111,6 +111,16 @@ func TestNewRejectsIncompleteOptions(t *testing.T) {
 	}
 }
 
+// A taskless run — the bootstrap manager review that selects a project's
+// first task — has no task to attribute an execution to. Begin must say so
+// rather than let the store reject it with a less specific error.
+func TestBeginRefusesATasklessRun(t *testing.T) {
+	recorder, _ := newRecorder(t)
+	if _, err := recorder.Begin(7, 0, "manager"); !errors.Is(err, ErrInvalidExecution) {
+		t.Fatalf("err = %v, want ErrInvalidExecution", err)
+	}
+}
+
 func TestCompleteStoresOutputAndLinksArtifact(t *testing.T) {
 	recorder, store := newRecorder(t)
 	record, err := recorder.Begin(7, 11, "planner")

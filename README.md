@@ -177,11 +177,26 @@ Mode outputs are written under `<workspace_dir>/.madar/executions/` and referenc
 
 **Sandboxing.** Every mode declares a workspace permission, and both provider adapters enforce it: `read-only` for Planner, Reviewer, Manager, and Architect — they cannot write files, edit code, or run commands — and `workspace-write` for Developer, Fixer, and Verifier. An unknown value is refused rather than ignored. `claude.skip_permissions` remains the explicit, documented way to opt out.
 
-**Implemented and tested, but still not driven by the daemon**
+**Safety policy.** An optional `policy:` block adds per-command and per-path rules on top of the sandbox. They are rendered into tool-permission patterns and handed to the provider, so a denied command or a denied write is refused at the moment of the tool call rather than noticed afterwards, when the file has already been written. Deny always wins, and a denied path is denied to every tool that can write it — a rule blocking `Write` but permitting `Edit` would be a rule in name only.
 
-- **The policy engine's per-command and per-path rules** — `policy.Engine` evaluates allow/deny globs correctly and is unit-tested, but nothing consults it when a mode runs. The coarse per-mode sandbox above *is* enforced; the fine-grained rules are not.
+```yaml
+policy:
+  commands:
+    default: ask          # allow | ask | deny — applies when nothing matches
+    allow:
+      - go test ./...
+    deny:
+      - git push --force
+  paths:
+    writable:
+      - "internal/**"
+    deny:
+      - .env              # denied even inside a writable root
+  require_approval:
+    - gh pr merge
+```
 
-Tracked on the [v2 tracker](https://github.com/eslam-mahmoud/go-ai-agent/issues/67).
+An absent block constrains nothing, so upgrading without one behaves exactly as before. **This is enforced on the Claude engine only** — the Codex CLI has no equivalent permission surface, so a Codex deployment gets the sandbox but not the fine-grained rules.
 
 ---
 
@@ -554,6 +569,19 @@ project:
     max_review_fix_cycles: 0
     max_ci_fix_cycles: 0
     max_mode_retries: 0
+
+# v2: safety policy, handed to the provider as tool-permission rules so a
+# denied command or write is refused at the tool call. Absent = unconstrained.
+# Enforced on the Claude engine only; Codex has no equivalent surface.
+policy:
+  commands:
+    default: ask         # allow | ask | deny when nothing matches
+    allow: []
+    deny: []
+  paths:
+    writable: []
+    deny: []             # denied even inside a writable root
+  require_approval: []
 
 # v2: bounds on owner commands, applied on top of TELEGRAM_ALLOWED_IDS.
 # Only the configured IDs may issue commands at all.

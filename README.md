@@ -175,9 +175,11 @@ Mode outputs are written under `<workspace_dir>/.madar/executions/` and referenc
 | `madar project reconcile --repo owner/name` | Run one reconciliation pass and report drift |
 | `madar migrate-project --repo owner/name` | Migrate a v1 repository into a v2 project |
 
+**Sandboxing.** Every mode declares a workspace permission, and both provider adapters enforce it: `read-only` for Planner, Reviewer, Manager, and Architect — they cannot write files, edit code, or run commands — and `workspace-write` for Developer, Fixer, and Verifier. An unknown value is refused rather than ignored. `claude.skip_permissions` remains the explicit, documented way to opt out.
+
 **Implemented and tested, but still not driven by the daemon**
 
-- **The policy engine's command and write rules** — `policy.Engine` evaluates them correctly, but enforcement happens at the provider's tool-call boundary, which is not yet threaded through. The coarse per-mode sandbox (`read-only` for planning and review, `workspace-write` for delivery) *is* enforced today.
+- **The policy engine's per-command and per-path rules** — `policy.Engine` evaluates allow/deny globs correctly and is unit-tested, but nothing consults it when a mode runs. The coarse per-mode sandbox above *is* enforced; the fine-grained rules are not.
 
 Tracked on the [v2 tracker](https://github.com/eslam-mahmoud/go-ai-agent/issues/67).
 

@@ -117,7 +117,12 @@ func (a *Adapter) run(
 		return nil, contextExecutionError("start", err, "")
 	}
 
-	args := buildArgs(request, resume)
+	args, err := buildArgs(request, resume)
+	if err != nil {
+		return nil, engine.NewExecutionError(
+			engine.ErrorPolicyDenied, a.Name(), "apply-policy", err,
+		)
+	}
 	cmd := exec.CommandContext(cmdCtx, a.binary, args...)
 	cmd.Dir = request.WorkDir
 	cmd.Env = mergeEnvironment(os.Environ(), request.Environment)
@@ -236,7 +241,26 @@ func (a *Adapter) run(
 	return result, nil
 }
 
-func buildArgs(request engine.RunRequest, resume bool) []string {
+// Sandbox names the workspace permission a mode declares. They mirror the
+// Codex vocabulary so one mode definition means the same thing on both
+// providers.
+const (
+	sandboxReadOnly       = "read-only"
+	sandboxWorkspaceWrite = "workspace-write"
+)
+
+// writeTools are the tools that can mutate the workspace. A read-only mode is
+// denied all of them, which is what makes "read-only" mean something rather
+// than being a label the adapter drops.
+var writeTools = []string{
+	"Bash",
+	"Edit",
+	"MultiEdit",
+	"NotebookEdit",
+	"Write",
+}
+
+func buildArgs(request engine.RunRequest, resume bool) ([]string, error) {
 	args := []string{
 		"-p", request.Prompt,
 		"--output-format", "stream-json",
@@ -253,13 +277,59 @@ func buildArgs(request engine.RunRequest, resume bool) []string {
 	if request.MaxTurns > 0 {
 		args = append(args, "--max-turns", fmt.Sprintf("%d", request.MaxTurns))
 	}
-	if request.Policy.SkipPermissions {
-		args = append(args, "--dangerously-skip-permissions")
+	policyArgs, err := policyArgs(request.Policy)
+	if err != nil {
+		return nil, err
 	}
+	args = append(args, policyArgs...)
 	if len(request.OutputSchema) > 0 {
 		args = append(args, "--json-schema", string(request.OutputSchema))
 	}
-	return args
+	return args, nil
+}
+
+// policyArgs translates the declared policy into CLI flags.
+//
+// Codex has always honoured Sandbox and ApprovalPolicy; this adapter read only
+// SkipPermissions, so a read-only mode could write files under Claude while
+// the identical mode could not under Codex. An unknown sandbox is refused
+// rather than ignored: a permission control that silently does nothing is
+// worse than one that is absent, because it is trusted.
+func policyArgs(policy engine.Policy) ([]string, error) {
+	if policy.SkipPermissions {
+		// The explicit, documented opt-out. It stays the only way past the
+		// sandbox, and it overrides the rest by design.
+		return []string{"--dangerously-skip-permissions"}, nil
+	}
+	var args []string
+	switch policy.Sandbox {
+	case "":
+		// No declared sandbox leaves the CLI's own defaults in place.
+	case sandboxReadOnly:
+		args = append(args, "--disallowedTools", strings.Join(writeTools, ","))
+	case sandboxWorkspaceWrite:
+		// Writes are the point of these modes; the workspace is the boundary,
+		// and the CLI already confines edits to its working directory.
+	default:
+		return nil, fmt.Errorf(
+			"unknown sandbox %q: expected %q or %q",
+			policy.Sandbox, sandboxReadOnly, sandboxWorkspaceWrite,
+		)
+	}
+	if policy.ApprovalPolicy != "" {
+		args = append(args, "--permission-mode", permissionMode(policy.ApprovalPolicy))
+	}
+	return args, nil
+}
+
+// permissionMode maps the provider-neutral approval policy onto Claude's own
+// vocabulary. "never" means the run must not stop to ask, since nothing is
+// watching a headless daemon.
+func permissionMode(approvalPolicy string) string {
+	if approvalPolicy == "never" {
+		return "acceptEdits"
+	}
+	return "default"
 }
 
 func mergeEnvironment(base []string, overrides map[string]string) []string {

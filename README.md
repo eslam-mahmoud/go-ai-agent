@@ -98,13 +98,13 @@ Madar delivers **one project**. Create it, give it work, and start the daemon.
 **1. Create the project.** The installer does this for you; do it manually if you built from source:
 
 ```bash
-madar project create -config config.yaml --repo owner/name --name "My Project" --goal "What done looks like"
+madar project create --repo owner/name --name "My Project" --goal "What done looks like"
 ```
 
 **2. Add work.** Either add tasks yourself:
 
 ```bash
-madar project add-task -config config.yaml --repo owner/name --title "Add rate limiting" --goal "Requests are capped per client"
+madar project add-task --repo owner/name --title "Add rate limiting" --goal "Requests are capped per client"
 ```
 
 …or set `project.auto_initialize: true` and let the Architect propose the first backlog by reading the repository.
@@ -112,13 +112,13 @@ madar project add-task -config config.yaml --repo owner/name --title "Add rate l
 **3. Start it.** The installer already did this. To run it yourself:
 
 ```bash
-madar -config config.yaml -env .env
+madar
 ```
 
 **4. Watch it work.** Each tick advances the project exactly one step:
 
 ```bash
-madar -config config.yaml -status
+madar -status
 ```
 
 ---
@@ -126,8 +126,10 @@ madar -config config.yaml -status
 ## Checking status
 
 ```bash
-madar -config config.yaml -status
+madar -status
 ```
+
+No flags needed: Madar finds its own configuration (see [configuration discovery](#configuration-discovery)).
 
 ```
 madar status
@@ -567,20 +569,36 @@ Madar refuses to start on a config containing these, naming the replacement rath
 
 ## CLI reference
 
+### Configuration discovery
+
+You rarely need `-config`. Madar looks for `config.yaml` in this order and uses the first that exists:
+
+1. The path given to `-config`, if any — used verbatim, so a typo is reported rather than silently replaced
+2. `$MADAR_CONFIG`
+3. `./config.yaml` — the working directory comes before the install location, so a checkout under development keeps using its own config
+4. `$MADAR_HOME/config.yaml` (`MADAR_HOME` defaults to `/opt/madar`)
+5. `~/.config/madar/config.yaml`
+
+**`.env` sits beside the config that was found**, not beside your working directory, unless you pass `-env` explicitly. This matters: resolving it against the working directory is how a perfectly correct `-config` ends up reporting a missing `GITHUB_TOKEN` — the config loads, the credentials do not, and the error names the wrong problem.
+
+When nothing is found, the error lists every path it tried.
+
+The installer links `madar` into `/usr/local/bin`, so it runs by name.
+
 ### Daemon flags
 
 | Flag | Default | Description |
 |---|---|---|
-| `-config` | `config.yaml` | Path to the YAML configuration file |
-| `-env` | `.env` | Path to the `.env` file; skipped if it does not exist |
+| `-config` | *discovered* | Path to the YAML configuration file |
+| `-env` | *beside the config* | Path to the `.env` file; skipped if it does not exist |
 | `-log-level` | `info` | `debug`, `info`, `warn`, or `error` |
-| `-status` | — | Print project status and exit. Opens the database read-only and does not take the daemon lock, so it is safe while Madar is running |
+| `-status` | — | Print project status and exit. Opens the database read-only, takes no lock, and needs no credentials — so it is safe while Madar is running |
 | `-version` | — | Print version, commit, and build date, then exit |
 | `-update` | — | Download the latest release, replace the running binary, and exit |
 
 ### Project commands
 
-These work directly against the configured SQLite database. Pass `-config` and `-env` after the subcommand when using non-default paths.
+These work directly against the configured SQLite database and use the same [configuration discovery](#configuration-discovery) as the daemon. Pass `-config` after the subcommand to override it.
 
 ```bash
 # Register the project this daemon delivers.
@@ -634,7 +652,7 @@ madar migrate-project --repo owner/repository
 
 ```bash
 set -a && source .env && set +a
-./madar -config config.yaml -env .env -log-level debug
+./madar -log-level debug
 ```
 
 The installer sets up a service for you. To write the unit by hand:
@@ -728,7 +746,7 @@ Tests use hand-rolled fakes rather than a mock framework, and require no network
 Madar delivers one project and cannot start without knowing which. Set `project.repo` in `config.yaml`, then create the project:
 
 ```bash
-madar project create -config config.yaml --repo owner/name --name "Name" --goal "Goal"
+madar project create --repo owner/name --name "Name" --goal "Goal"
 ```
 
 ### `config uses keys removed with v1 issue mode`
@@ -737,11 +755,14 @@ Your config predates the removal of issue mode. The error names each stale key a
 ### `no v2 project exists for "owner/name"`
 The config names a repository that has no project row. Create it with `madar project create`, or check for a typo against `madar project list`.
 
+### `no config.yaml found`
+Madar lists every path it looked in. Put a config at one of them, pass `-config <path>`, or set `MADAR_HOME` to your install directory (`/opt/madar` by default).
+
 ### `claude binary not found`
 Install it with `npm install -g @anthropic-ai/claude-code`, then `claude login`. If it lives somewhere unusual, set `claude.bin` in `config.yaml`.
 
 ### `GITHUB_TOKEN is required`
-Add `GITHUB_TOKEN=ghp_...` to `.env`. It needs `repo` scope.
+Add `GITHUB_TOKEN=ghp_...` to `.env`. It needs `repo` scope. The error names the `.env` path Madar actually used — if that is not the file you edited, that is the real problem.
 
 ### Nothing is happening
 Run `madar -status`. Common causes, in the order worth checking:

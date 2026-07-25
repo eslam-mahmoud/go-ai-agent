@@ -62,8 +62,10 @@ func main() {
 		return
 	}
 
-	configPath := flag.String("config", "config.yaml", "path to config.yaml")
-	envPath := flag.String("env", ".env", "path to .env file")
+	configPath := flag.String("config", "",
+		"path to config.yaml (default: discovered — see -help)")
+	envPath := flag.String("env", "",
+		"path to the .env file (default: beside the config that was found)")
 	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	showStatus := flag.Bool("status", false, "print agent status from the database and exit")
@@ -82,14 +84,37 @@ func main() {
 
 	log := newLogger(*logLevel)
 
-	cfg, err := config.Load(*configPath, *envPath)
+	discovery := config.DiscoverConfig(*configPath)
+	if discovery.ConfigPath == "" {
+		log.Error("failed to load config", "err", discovery.NotFoundError())
+		os.Exit(1)
+	}
+	// The .env sits beside the config that was actually found. Defaulting it
+	// to the working directory is how a correct -config still ends up
+	// reporting a missing token: the config loads, the credentials do not,
+	// and the error names the wrong problem.
+	cfg, err := config.Load(discovery.ConfigPath, config.ResolveEnv(*envPath, discovery.ConfigPath))
 	if err != nil {
-		log.Error("failed to load config", "err", err)
+		log.Error("failed to load config", "err", err, "path", discovery.ConfigPath)
 		os.Exit(1)
 	}
 
+	// Status reads the local database and nothing else, so it runs before the
+	// checks for credentials and tools it will never use.
+	if *showStatus {
+		s, err := store.OpenReadOnly(cfg.DBPath)
+		if err != nil {
+			log.Error("failed to open store for status", "err", err)
+			os.Exit(1)
+		}
+		printStatus(s, cfg)
+		_ = s.Close()
+		return
+	}
+
 	if cfg.GitHub.Token == "" {
-		log.Error("GITHUB_TOKEN is required")
+		log.Error("GITHUB_TOKEN is required",
+			"env", config.ResolveEnv(*envPath, discovery.ConfigPath))
 		os.Exit(1)
 	}
 
@@ -102,17 +127,6 @@ func main() {
 		log.Error("claude binary not found — install Claude Code or set claude.bin in config",
 			"bin", claudeBin, "err", err)
 		os.Exit(1)
-	}
-
-	if *showStatus {
-		s, err := store.OpenReadOnly(cfg.DBPath)
-		if err != nil {
-			log.Error("failed to open store for status", "err", err)
-			os.Exit(1)
-		}
-		printStatus(s, cfg)
-		_ = s.Close()
-		return
 	}
 
 	// The daemon delivers exactly one project, so it cannot start without

@@ -10,6 +10,7 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -231,6 +232,7 @@ type fakeGitHub struct {
 	labelWrites int
 	closes      int
 	lastLabels  []string
+	checkStatus githubclient.CheckStatus
 }
 
 func newFakeGitHub() *fakeGitHub {
@@ -311,6 +313,29 @@ func (fake *fakeGitHub) CloseIssue(
 		issue.State = "closed"
 	}
 	return nil
+}
+
+func (fake *fakeGitHub) UpdateIssueBody(
+	_ context.Context, _, _ string, number int, body string,
+) (*githubclient.Issue, error) {
+	issue, ok := fake.issues[number]
+	if !ok {
+		return nil, fmt.Errorf("issue %d not found", number)
+	}
+	issue.Body = body
+	copied := *issue
+	return &copied, nil
+}
+
+// GetCheckSuiteStatus reports whatever the scenario configured, so a test can
+// exercise the verifier's CI gate without a network.
+func (fake *fakeGitHub) GetCheckSuiteStatus(
+	_ context.Context, _, _, _ string,
+) (githubclient.CheckStatus, error) {
+	if fake.checkStatus == "" {
+		return githubclient.CheckSuccess, nil
+	}
+	return fake.checkStatus, nil
 }
 
 func (fake *fakeGitHub) ListPullRequestsForBranch(

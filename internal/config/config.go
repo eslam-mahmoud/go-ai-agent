@@ -28,6 +28,7 @@ type Config struct {
 	CI           CIConfig
 	Cleanup      CleanupConfig
 	Reconcile    ReconcileConfig
+	Project      ProjectConfig
 	GitHub       GitHubConfig
 	Telegram     TelegramConfig
 	DBPath       string
@@ -82,6 +83,25 @@ type CleanupConfig struct {
 	Interval          time.Duration // how often to run pruning (default 24h)
 	AuditLogRetention time.Duration // delete audit entries older than this (default 30d)
 	TaskRetention     time.Duration // delete done tasks older than this (default 90d)
+}
+
+// ProjectConfig selects and configures v2 project mode. It is opt-in: an
+// existing installation keeps running v1 issue mode until it says otherwise.
+type ProjectConfig struct {
+	Enabled        bool
+	Repo           string
+	AutoInitialize bool
+	Interval       time.Duration
+	Budgets        BudgetConfig
+}
+
+// BudgetConfig bounds what one task may consume. Every zero means unlimited,
+// which is the historical behaviour.
+type BudgetConfig struct {
+	MaxTaskDuration    time.Duration
+	MaxReviewFixCycles int
+	MaxCIFixCycles     int
+	MaxModeRetries     int
 }
 
 // ReconcileConfig controls GitHub reconciliation. A zero interval disables
@@ -198,6 +218,18 @@ type rawConfig struct {
 		IntervalStr string `yaml:"interval"`
 		OnStartup   *bool  `yaml:"on_startup"`
 	} `yaml:"reconcile"`
+	Project struct {
+		Enabled        bool   `yaml:"enabled"`
+		Repo           string `yaml:"repo"`
+		AutoInitialize bool   `yaml:"auto_initialize"`
+		IntervalStr    string `yaml:"interval"`
+		Budgets        struct {
+			MaxTaskDurationStr string `yaml:"max_task_duration"`
+			MaxReviewFixCycles int    `yaml:"max_review_fix_cycles"`
+			MaxCIFixCycles     int    `yaml:"max_ci_fix_cycles"`
+			MaxModeRetries     int    `yaml:"max_mode_retries"`
+		} `yaml:"budgets"`
+	} `yaml:"project"`
 	Telegram struct {
 		CommandMaxAgeStr     string `yaml:"command_max_age"`
 		RateWindowStr        string `yaml:"rate_window"`
@@ -245,6 +277,29 @@ func Load(configPath, envPath string) (*Config, error) {
 	ciWaitTimeout, err := time.ParseDuration(raw.CI.WaitTimeoutStr)
 	if err != nil {
 		return nil, fmt.Errorf("parse ci.wait_timeout %q: %w", raw.CI.WaitTimeoutStr, err)
+	}
+	projectInterval, err := time.ParseDuration(raw.Project.IntervalStr)
+	if err != nil {
+		return nil, fmt.Errorf("parse project.interval %q: %w", raw.Project.IntervalStr, err)
+	}
+	maxTaskDuration, err := time.ParseDuration(raw.Project.Budgets.MaxTaskDurationStr)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"parse project.budgets.max_task_duration %q: %w",
+			raw.Project.Budgets.MaxTaskDurationStr, err,
+		)
+	}
+	for name, value := range map[string]int{
+		"max_review_fix_cycles": raw.Project.Budgets.MaxReviewFixCycles,
+		"max_ci_fix_cycles":     raw.Project.Budgets.MaxCIFixCycles,
+		"max_mode_retries":      raw.Project.Budgets.MaxModeRetries,
+	} {
+		if value < 0 {
+			return nil, fmt.Errorf("project.budgets.%s cannot be negative", name)
+		}
+	}
+	if raw.Project.Enabled && strings.TrimSpace(raw.Project.Repo) == "" {
+		return nil, fmt.Errorf("project.repo is required when project mode is enabled")
 	}
 	commandMaxAge, err := time.ParseDuration(raw.Telegram.CommandMaxAgeStr)
 	if err != nil {
@@ -326,6 +381,18 @@ func Load(configPath, envPath string) (*Config, error) {
 			AutoMerge:    raw.CI.AutoMerge,
 			MergeMethod:  raw.CI.MergeMethod,
 		},
+		Project: ProjectConfig{
+			Enabled:        raw.Project.Enabled,
+			Repo:           strings.TrimSpace(raw.Project.Repo),
+			AutoInitialize: raw.Project.AutoInitialize,
+			Interval:       projectInterval,
+			Budgets: BudgetConfig{
+				MaxTaskDuration:    maxTaskDuration,
+				MaxReviewFixCycles: raw.Project.Budgets.MaxReviewFixCycles,
+				MaxCIFixCycles:     raw.Project.Budgets.MaxCIFixCycles,
+				MaxModeRetries:     raw.Project.Budgets.MaxModeRetries,
+			},
+		},
 		Reconcile: ReconcileConfig{
 			Interval:  reconcileInterval,
 			OnStartup: *raw.Reconcile.OnStartup,
@@ -402,6 +469,14 @@ func applyDefaults(raw *rawConfig) {
 	}
 	if raw.Reconcile.IntervalStr == "" {
 		raw.Reconcile.IntervalStr = "15m"
+	}
+	if raw.Project.IntervalStr == "" {
+		raw.Project.IntervalStr = "30s"
+	}
+	if raw.Project.Budgets.MaxTaskDurationStr == "" {
+		// Zero means unlimited, preserving behaviour for anyone who upgrades
+		// without adding a budgets block.
+		raw.Project.Budgets.MaxTaskDurationStr = "0s"
 	}
 	if raw.Telegram.CommandMaxAgeStr == "" {
 		raw.Telegram.CommandMaxAgeStr = "10m"

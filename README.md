@@ -116,12 +116,51 @@ Madar compares durable state against GitHub, converges what is safe (status labe
 
 ## v2 Status
 
-The v2 backlog is implemented and tested, but not all of it is driven by the daemon yet. This section says exactly which is which, because a README that implies otherwise is worse than no README.
+The v2 delivery cycle now runs in the daemon, but it is opt-in. This section says exactly what runs and what does not, because a README that implies otherwise is worse than no README.
 
 **Running in the daemon today**
 
-- v1 issue mode — the polling loop, Claude execution, CI feedback, Telegram notifications.
+- v1 issue mode — the polling loop, Claude execution, CI feedback, Telegram notifications. Unchanged.
 - **GitHub reconciliation** — one pass at startup before work is picked up, then on `reconcile.interval`. A failing pass is logged and retried; it never stops delivery.
+- **The v2 delivery cycle**, when `project.enabled: true` — see below.
+
+**Enabling v2 project mode**
+
+Project mode is off by default, so upgrading changes nothing until you ask for it. Create the project first, then turn the loop on:
+
+```bash
+madar project create --repo owner/name --name "My Project" --goal "What done looks like"
+```
+
+```yaml
+project:
+  enabled: true
+  repo: owner/name        # required when enabled
+  auto_initialize: false  # let the Architect create the first backlog
+  interval: 30s
+  budgets:                # every zero means unlimited
+    max_task_duration: 0s
+    max_review_fix_cycles: 0
+    max_ci_fix_cycles: 0
+    max_mode_retries: 0
+```
+
+Each tick advances the project exactly one step, which keeps the permanent invariant visible in the logs: one goal, one task, one branch, one delivery decision at a time.
+
+| Project state | What the tick does |
+| --- | --- |
+| paused | nothing |
+| no backlog | initializes it (`auto_initialize`), otherwise idles |
+| no current task | runs an Engineering Manager review to select the next one |
+| task in flight | runs the sequential workflow: planner → developer → reviewer → fixer → verifier |
+| task terminal | runs the manager review, decides discoveries, publishes, selects the next task |
+| budget exhausted | stops and records `budget.exhausted` |
+
+Mode outputs are written under `<workspace_dir>/.madar/executions/` and referenced from the `executions` table, which is how the developer reads the plan and the fixer reads the review across restarts.
+
+**Optional stages degrade rather than fail.** Without `GITHUB_TOKEN` the cycle still decides but cannot publish issues or read CI. Without a Telegram bot token there is no live status message and no command surface. Without `telegram.allowed_ids` the command surface is not built at all, since an empty allowlist authorizes nobody.
+
+**Owner commands.** With project mode on, `/status`, `/project`, `/plan`, `/next`, `/logs`, `/pause`, `/resume`, `/cancel`, and `/retry` are answered by the v2 router, which enforces the allowlist, command expiry, and rate limits. They share the existing Telegram poller; any command the router does not know falls through to the v1 surface unchanged. Note that `/status` is answered by v2 once project mode is on.
 
 **Available from the command line**
 
@@ -136,11 +175,12 @@ The v2 backlog is implemented and tested, but not all of it is driven by the dae
 | `madar project reconcile --repo owner/name` | Run one reconciliation pass and report drift |
 | `madar migrate-project --repo owner/name` | Migrate a v1 repository into a v2 project |
 
-**Implemented and tested, but not yet driven by the daemon**
+**Implemented and tested, but still not driven by the daemon**
 
-The delivery modes, the sequential workflow engine, the Engineering Manager loop, discovery extraction and decisions, Architect mode and document generation, project initialization, the Telegram command surface and live status message, the policy engine, and budgets.
+- **Architect mode** — the architecture documents it produces have a writer and a controller, but no store-backed loader supplies its context, so nothing runs the mode itself.
+- **The policy engine's command and write rules** — `policy.Engine` evaluates them correctly, but enforcement happens at the provider's tool-call boundary, which is not yet threaded through. The coarse per-mode sandbox (`read-only` for planning and review, `workspace-write` for delivery) *is* enforced today.
 
-Each is complete, unit-tested, and exercised end to end by `internal/e2e` — but `cmd/madar/main.go` does not construct them, so a running daemon does not execute the v2 delivery cycle. Wiring that is tracked as a follow-up on the [v2 tracker](https://github.com/eslam-mahmoud/go-ai-agent/issues/67).
+Both are tracked on the [v2 tracker](https://github.com/eslam-mahmoud/go-ai-agent/issues/67).
 
 ---
 
@@ -500,6 +540,19 @@ cleanup:
 reconcile:
   interval: 15m        # how often to reconcile; 0 runs only the startup pass
   on_startup: true     # reconcile before picking up work
+
+# v2: the delivery cycle. Off by default — an upgrade changes nothing until
+# this block enables it, and the project must already exist in the database.
+project:
+  enabled: false          # opt in to v2 project mode
+  repo: owner/name        # required when enabled
+  auto_initialize: false  # let the Architect create the first backlog
+  interval: 30s           # one delivery step per tick
+  budgets:                # every zero means unlimited
+    max_task_duration: 0s
+    max_review_fix_cycles: 0
+    max_ci_fix_cycles: 0
+    max_mode_retries: 0
 
 # v2: bounds on owner commands, applied on top of TELEGRAM_ALLOWED_IDS.
 # Only the configured IDs may issue commands at all.

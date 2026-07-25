@@ -38,6 +38,7 @@ const (
 	WorkflowArchitectureReviewRequired WorkflowEventType = "architecture.review-required"
 	WorkflowBacklogInitialized         WorkflowEventType = "backlog.initialized"
 	WorkflowTaskIssueFiled             WorkflowEventType = "task.issue-filed"
+	WorkflowTaskPullRequestFound       WorkflowEventType = "task.pull-request-found"
 )
 
 var ErrInvalidWorkflowEvent = errors.New("invalid workflow event")

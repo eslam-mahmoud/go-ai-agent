@@ -93,7 +93,10 @@ func TestSetCIWatchStartedAt(t *testing.T) {
 
 func TestCIStateConstants(t *testing.T) {
 	// Ensure state strings are stable (used as DB values).
-	cases := []struct{ state CIState; want string }{
+	cases := []struct {
+		state CIState
+		want  string
+	}{
 		{CIStateNone, ""},
 		{CIStateWaiting, "waiting"},
 		{CIStatePassed, "passed"},

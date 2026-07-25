@@ -22,6 +22,18 @@ type Issue struct {
 	State string
 }
 
+// PullRequest is the subset of a GitHub pull request Madar reasons about.
+type PullRequest struct {
+	Number     int
+	Title      string
+	HeadBranch string
+	State      string
+	Merged     bool
+	Draft      bool
+	HTMLURL    string
+	MergedAt   *time.Time
+}
+
 type Comment struct {
 	ID        int64
 	Body      string
@@ -47,6 +59,12 @@ type Client interface {
 	GetFailedStepOutput(ctx context.Context, owner, repo, branch string) (string, error)
 	// MergePullRequest merges prNumber using method ("merge", "squash", or "rebase").
 	MergePullRequest(ctx context.Context, owner, repo string, prNumber int, method string) error
+	// ListPullRequestsForBranch returns every pull request opened from branch,
+	// in any state, most recently updated first.
+	ListPullRequestsForBranch(
+		ctx context.Context,
+		owner, repo, branch string,
+	) ([]*PullRequest, error)
 	// CreateIssue opens a new issue with the given title, body, and labels.
 	CreateIssue(ctx context.Context, owner, repo, title, body string, labels []string) (*Issue, error)
 	UpdateIssueBody(ctx context.Context, owner, repo string, number int, body string) (*Issue, error)
@@ -277,6 +295,53 @@ func (c *githubClient) UpdateIssueBody(
 		return nil, fmt.Errorf("update issue %d body: %w", number, err)
 	}
 	return toIssue(i), nil
+}
+
+func (c *githubClient) ListPullRequestsForBranch(
+	ctx context.Context,
+	owner, repo, branch string,
+) ([]*PullRequest, error) {
+	opts := &gh.PullRequestListOptions{
+		State:       "all",
+		Head:        owner + ":" + branch,
+		Sort:        "updated",
+		Direction:   "desc",
+		ListOptions: gh.ListOptions{PerPage: 100},
+	}
+	var pulls []*PullRequest
+	for {
+		page, resp, err := c.gh.PullRequests.List(ctx, owner, repo, opts)
+		if err := c.logRateLimit(resp, err); err != nil {
+			return nil, fmt.Errorf("list pull requests: %w", err)
+		}
+		for _, pull := range page {
+			pulls = append(pulls, toPullRequest(pull))
+		}
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return pulls, nil
+}
+
+func toPullRequest(pull *gh.PullRequest) *PullRequest {
+	converted := &PullRequest{
+		Number:  pull.GetNumber(),
+		Title:   pull.GetTitle(),
+		State:   pull.GetState(),
+		Merged:  pull.GetMerged() || pull.MergedAt != nil,
+		Draft:   pull.GetDraft(),
+		HTMLURL: pull.GetHTMLURL(),
+	}
+	if head := pull.GetHead(); head != nil {
+		converted.HeadBranch = head.GetRef()
+	}
+	if pull.MergedAt != nil {
+		merged := pull.MergedAt.Time
+		converted.MergedAt = &merged
+	}
+	return converted
 }
 
 func (c *githubClient) MergePullRequest(ctx context.Context, owner, repo string, prNumber int, method string) error {

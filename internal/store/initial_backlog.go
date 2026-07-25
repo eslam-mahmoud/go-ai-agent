@@ -191,3 +191,95 @@ func (s *Store) RecordProjectTaskIssue(
 	}
 	return s.GetProjectTaskByID(taskID)
 }
+
+// RecordProjectTaskPullRequest binds a task to the pull request discovered for
+// its branch. As with issue numbers, the compare-and-set is what makes
+// repeated reconciliation safe.
+func (s *Store) RecordProjectTaskPullRequest(
+	projectID, taskID int64,
+	prNumber int,
+) (*domain.Task, error) {
+	if projectID <= 0 || taskID <= 0 || prNumber <= 0 {
+		return nil, fmt.Errorf(
+			"%w: project, task, and pull request numbers must be positive",
+			domain.ErrInvalidTask,
+		)
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin record task pull request: %w", err)
+	}
+	defer tx.Rollback()
+
+	var storedProjectID int64
+	var storedPR int
+	err = tx.QueryRow(`
+		SELECT project_id, pr_number FROM project_tasks WHERE id = ?
+	`, taskID).Scan(&storedProjectID, &storedPR)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("%w: ID %d", ErrProjectTaskNotFound, taskID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read task for pull request: %w", err)
+	}
+	if storedProjectID != projectID {
+		return nil, fmt.Errorf(
+			"%w: task %d belongs to project %d, not %d",
+			domain.ErrInvalidTask,
+			taskID,
+			storedProjectID,
+			projectID,
+		)
+	}
+	if storedPR == prNumber {
+		if err := tx.Rollback(); err != nil {
+			return nil, fmt.Errorf("close replayed task pull request: %w", err)
+		}
+		return s.GetProjectTaskByID(taskID)
+	}
+	if storedPR != 0 {
+		return nil, fmt.Errorf(
+			"%w: task %d already records pull request #%d",
+			ErrProjectTaskIssueConflict,
+			taskID,
+			storedPR,
+		)
+	}
+
+	now := time.Now().UTC()
+	result, err := tx.Exec(`
+		UPDATE project_tasks
+		SET pr_number = ?, updated_at = ?
+		WHERE id = ? AND project_id = ? AND pr_number = 0
+	`, prNumber, now, taskID, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("record task pull request: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil {
+		return nil, fmt.Errorf("read task pull request count: %w", err)
+	} else if changed != 1 {
+		return nil, fmt.Errorf(
+			"%w: task %d changed while binding its pull request",
+			ErrProjectTaskIssueConflict,
+			taskID,
+		)
+	}
+	boundTaskID := taskID
+	if err := appendWorkflowFactTx(
+		tx,
+		projectID,
+		&boundTaskID,
+		nil,
+		domain.WorkflowSourceExternal,
+		domain.WorkflowTaskPullRequestFound,
+		fmt.Sprintf("Task %d matched pull request #%d.", taskID, prNumber),
+		map[string]any{"task_id": taskID, "pr_number": prNumber},
+		fmt.Sprintf("task:%d:pull-request", taskID),
+	); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit record task pull request: %w", err)
+	}
+	return s.GetProjectTaskByID(taskID)
+}

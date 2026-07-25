@@ -2,7 +2,9 @@ package e2e
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,13 +21,25 @@ func (h *harness) newDaemonLoop(
 	t *testing.T, script *modeScript, manager *scriptedManager,
 ) *projectloop.Loop {
 	t.Helper()
+	return h.newDaemonLoopWithArchitect(t, script, manager, &scriptedArchitect{
+		output: architectOutput(),
+	})
+}
+
+func (h *harness) newDaemonLoopWithArchitect(
+	t *testing.T,
+	script *modeScript,
+	manager *scriptedManager,
+	architect *scriptedArchitect,
+) *projectloop.Loop {
+	t.Helper()
 	cfg := &config.Config{WorkspaceDir: h.workspaceRoot}
 	loop, err := projectloop.BuildWithRunners(projectloop.Dependencies{
 		Config:    cfg,
 		Store:     h.store,
 		GitHub:    h.github,
 		ProjectID: h.projectID,
-	}, script, manager)
+	}, script, manager, architect)
 	if err != nil {
 		t.Fatalf("building the daemon's wiring: %v", err)
 	}
@@ -176,7 +190,7 @@ func TestDaemonWiringRunsWithoutGitHubCredentials(t *testing.T) {
 			"issue_number": task.IssueNumber,
 			"reason":       "Only task in the backlog.",
 		},
-	})})
+	})}, &scriptedArchitect{output: architectOutput()})
 	if err != nil {
 		t.Fatalf("building without GitHub: %v", err)
 	}
@@ -188,3 +202,85 @@ func TestDaemonWiringRunsWithoutGitHubCredentials(t *testing.T) {
 		t.Fatalf("outcome = %#v", outcome)
 	}
 }
+
+// A manager review that requires architecture review must actually run the
+// Architect. Recording the obligation and stopping there is the failure this
+// item existed to fix: the mode was complete and unreachable.
+func TestDaemonWiringRunsTheArchitectWhenReviewRequiresIt(t *testing.T) {
+	harness := newHarness(t)
+	task := harness.queueTask("Needs an architecture decision", 406)
+
+	architect := &scriptedArchitect{output: architectOutput()}
+	manager := &scriptedManager{output: managerOutput(map[string]any{
+		"architecture_review_required": true,
+		"discoveries": []any{
+			map[string]any{
+				"title":       "The delivery loop has no back pressure",
+				"description": "Ticks queue without bound when the provider is slow.",
+				"category":    "architecture",
+				"severity":    "high",
+			},
+		},
+		"next_task": map[string]any{
+			"task_id":      task.ID,
+			"issue_number": task.IssueNumber,
+			"reason":       "First in the ordered backlog.",
+		},
+	})}
+	loop := harness.newDaemonLoopWithArchitect(t, newScript(), manager, architect)
+
+	// Selection is refused while an architecture risk is unresolved, which is
+	// the invariant doing its job. What matters here is that the architect
+	// ran first rather than the obligation being recorded and abandoned.
+	_, err := loop.Tick(context.Background())
+	if err == nil {
+		t.Fatal("selection must be refused while an architecture risk is open")
+	}
+	if !strings.Contains(err.Error(), "architecture risk") {
+		t.Fatalf("err = %v, want the architecture-risk precondition", err)
+	}
+	if architect.calls != 1 {
+		t.Fatalf("architect ran %d times, want 1", architect.calls)
+	}
+	harness.requireEvent(domain.WorkflowArchitectureReviewRequired)
+}
+
+// An architect failure must not lose the delivery decision the manager already
+// made: the review is durable before the architecture run is attempted.
+func TestArchitectFailureDoesNotDiscardTheReview(t *testing.T) {
+	harness := newHarness(t)
+	task := harness.queueTask("Still selectable", 407)
+
+	architect := &scriptedArchitect{err: errAchitectUnavailable}
+	manager := &scriptedManager{output: managerOutput(map[string]any{
+		"architecture_review_required": true,
+		"discoveries": []any{
+			map[string]any{
+				"title":       "Unbounded retry loop",
+				"description": "Failures retry without a ceiling.",
+				"category":    "architecture",
+				"severity":    "high",
+			},
+		},
+		"next_task": map[string]any{
+			"task_id":      task.ID,
+			"issue_number": task.IssueNumber,
+			"reason":       "First in the ordered backlog.",
+		},
+	})}
+	loop := harness.newDaemonLoopWithArchitect(t, newScript(), manager, architect)
+
+	_, err := loop.Tick(context.Background())
+	if err == nil {
+		t.Fatal("an architect failure must surface rather than be swallowed")
+	}
+	reviews, listErr := harness.store.LatestManagerReview(harness.projectID)
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if reviews == nil {
+		t.Fatal("the manager review must be durable before the architect runs")
+	}
+}
+
+var errAchitectUnavailable = errors.New("architect engine unavailable")

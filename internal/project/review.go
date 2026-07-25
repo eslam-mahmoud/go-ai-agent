@@ -40,13 +40,16 @@ type ReviewResult struct {
 	DiscoveryIssues  *DiscoveryIssueResult
 	DiscoveryBacklog *DiscoveryBacklogResult
 	Architecture     *ArchitectureAssessment
-	AlreadyDone      bool
-	Review           *domain.ManagerReview
-	Backlog          *BacklogResult
-	Selection        *SelectionResult
-	Publication      *PublicationResult
-	NoNextTask       bool
-	Question         string
+	// ArchitectureProposal is the raw Architect output, present only when the
+	// review required architecture review and a runner produced one.
+	ArchitectureProposal json.RawMessage
+	AlreadyDone          bool
+	Review               *domain.ManagerReview
+	Backlog              *BacklogResult
+	Selection            *SelectionResult
+	Publication          *PublicationResult
+	NoNextTask           bool
+	Question             string
 }
 
 // ReviewCoordinator closes Madar's delivery loop. When a task reaches a
@@ -262,11 +265,15 @@ func (coordinator *ReviewCoordinator) applyDecisions(
 		result.DiscoveryBacklog = queued
 	}
 	if coordinator.architecture != nil {
-		assessment, err := coordinator.architecture.Assess(projectID)
+		// RunArchitect assesses first and runs Architect mode only when the
+		// obligation is real and a runner is configured. Calling Assess alone
+		// recorded the obligation and never acted on it.
+		assessment, proposal, err := coordinator.architecture.RunArchitect(ctx, projectID)
 		if err != nil {
 			return err
 		}
 		result.Architecture = assessment
+		result.ArchitectureProposal = proposal
 	}
 
 	backlog, err := coordinator.backlog.ApplyManagerReview(projectID, review.ID)

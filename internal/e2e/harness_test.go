@@ -358,6 +358,42 @@ func (manager *scriptedManager) RunManagerReview(
 	return manager.output, nil
 }
 
+// scriptedArchitect stands in for Architect mode, recording that it ran so a
+// test can prove the architecture obligation was acted on rather than merely
+// recorded.
+type scriptedArchitect struct {
+	output json.RawMessage
+	calls  int
+	err    error
+}
+
+func (architect *scriptedArchitect) RunArchitect(
+	_ context.Context, _ int64, _ []int64,
+) (json.RawMessage, error) {
+	architect.calls++
+	if architect.err != nil {
+		return nil, architect.err
+	}
+	return architect.output, nil
+}
+
+// architectOutput builds schema-shaped architecture proposal output.
+func architectOutput() json.RawMessage {
+	raw, err := json.Marshal(map[string]any{
+		"status":             "completed",
+		"summary":            "Proposed an architecture for the outstanding risks.",
+		"question":           nil,
+		"discoveries":        []any{},
+		"architecture_notes": "Keep the delivery loop single-step.",
+		"components":         []any{},
+		"decisions":          []any{},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return raw
+}
+
 // managerOutput builds schema-shaped manager output with overrides.
 func managerOutput(overrides map[string]any) json.RawMessage {
 	output := map[string]any{

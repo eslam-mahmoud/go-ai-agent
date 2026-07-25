@@ -307,6 +307,13 @@ var _ githubclient.Client = (*fakeGitHubCI)(nil)
 func (f *fakeGitHubCI) GetAuthenticatedUsername(_ context.Context) (string, error) {
 	return "madar-bot", nil
 }
+func (f *fakeGitHubCI) ListPullRequestsForBranch(
+	_ context.Context,
+	_, _, _ string,
+) ([]*githubclient.PullRequest, error) {
+	return nil, nil
+}
+
 func (f *fakeGitHubCI) ListOpenIssues(_ context.Context, _, _ string) ([]*githubclient.Issue, error) {
 	return nil, nil
 }

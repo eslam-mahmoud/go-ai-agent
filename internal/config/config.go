@@ -123,6 +123,14 @@ type GitHubConfig struct {
 type TelegramConfig struct {
 	BotToken   string
 	AllowedIDs []string
+	// CommandMaxAge refuses commands older than this, so a replayed update
+	// backlog cannot take effect long after it was written. Zero disables it.
+	CommandMaxAge time.Duration
+	// RateWindow and the two limits bound how fast one sender may issue
+	// commands. Control commands get the tighter limit.
+	RateWindow          time.Duration
+	MaxCommandsPerLimit int
+	MaxControlPerLimit  int
 }
 
 // rawRepoConfig supports both plain-string and object YAML forms:
@@ -190,6 +198,12 @@ type rawConfig struct {
 		IntervalStr string `yaml:"interval"`
 		OnStartup   *bool  `yaml:"on_startup"`
 	} `yaml:"reconcile"`
+	Telegram struct {
+		CommandMaxAgeStr     string `yaml:"command_max_age"`
+		RateWindowStr        string `yaml:"rate_window"`
+		MaxCommandsPerWindow int    `yaml:"max_commands_per_window"`
+		MaxControlPerWindow  int    `yaml:"max_control_per_window"`
+	} `yaml:"telegram"`
 	Cleanup struct {
 		IntervalStr          string `yaml:"interval"`
 		AuditLogRetentionStr string `yaml:"audit_log_retention"`
@@ -231,6 +245,19 @@ func Load(configPath, envPath string) (*Config, error) {
 	ciWaitTimeout, err := time.ParseDuration(raw.CI.WaitTimeoutStr)
 	if err != nil {
 		return nil, fmt.Errorf("parse ci.wait_timeout %q: %w", raw.CI.WaitTimeoutStr, err)
+	}
+	commandMaxAge, err := time.ParseDuration(raw.Telegram.CommandMaxAgeStr)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"parse telegram.command_max_age %q: %w",
+			raw.Telegram.CommandMaxAgeStr, err,
+		)
+	}
+	rateWindow, err := time.ParseDuration(raw.Telegram.RateWindowStr)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"parse telegram.rate_window %q: %w", raw.Telegram.RateWindowStr, err,
+		)
 	}
 	reconcileInterval, err := time.ParseDuration(raw.Reconcile.IntervalStr)
 	if err != nil {
@@ -284,8 +311,12 @@ func Load(configPath, envPath string) (*Config, error) {
 			Token: os.Getenv("GITHUB_TOKEN"),
 		},
 		Telegram: TelegramConfig{
-			BotToken:   os.Getenv("TELEGRAM_BOT_TOKEN"),
-			AllowedIDs: telegramIDs,
+			BotToken:            os.Getenv("TELEGRAM_BOT_TOKEN"),
+			AllowedIDs:          telegramIDs,
+			CommandMaxAge:       commandMaxAge,
+			RateWindow:          rateWindow,
+			MaxCommandsPerLimit: raw.Telegram.MaxCommandsPerWindow,
+			MaxControlPerLimit:  raw.Telegram.MaxControlPerWindow,
 		},
 		CI: CIConfig{
 			Enabled:      raw.CI.Enabled,
@@ -371,6 +402,18 @@ func applyDefaults(raw *rawConfig) {
 	}
 	if raw.Reconcile.IntervalStr == "" {
 		raw.Reconcile.IntervalStr = "15m"
+	}
+	if raw.Telegram.CommandMaxAgeStr == "" {
+		raw.Telegram.CommandMaxAgeStr = "10m"
+	}
+	if raw.Telegram.RateWindowStr == "" {
+		raw.Telegram.RateWindowStr = "1m"
+	}
+	if raw.Telegram.MaxCommandsPerWindow == 0 {
+		raw.Telegram.MaxCommandsPerWindow = 20
+	}
+	if raw.Telegram.MaxControlPerWindow == 0 {
+		raw.Telegram.MaxControlPerWindow = 5
 	}
 	if raw.Reconcile.OnStartup == nil {
 		// A restart should repair drift before building on it.

@@ -9,12 +9,12 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 var (
-	ErrNotACommand   = errors.New("message is not a command")
-	ErrUnauthorized  = errors.New("sender is not authorized")
-	ErrUnknownComman = errors.New("unknown command")
+	ErrNotACommand  = errors.New("message is not a command")
+	ErrUnauthorized = errors.New("sender is not authorized")
 )
 
 // Name is one supported command, without its leading slash.
@@ -37,12 +37,20 @@ type Command struct {
 	UserID int64
 	// Raw is the original message, kept for auditing.
 	Raw string
+	// SentAt is when Telegram says the message was written. A zero value
+	// disables the freshness check for that command.
+	SentAt time.Time
 }
 
 // Parse turns a message into a command. Text that is not a command is
 // reported as such rather than treated as an error condition, since most
 // messages in a chat are not commands.
 func Parse(text string, chatID, userID int64) (Command, error) {
+	return ParseAt(text, chatID, userID, time.Time{})
+}
+
+// ParseAt is Parse with the message timestamp, which the expiry check uses.
+func ParseAt(text string, chatID, userID int64, sentAt time.Time) (Command, error) {
 	trimmed := strings.TrimSpace(text)
 	if !strings.HasPrefix(trimmed, "/") {
 		return Command{}, ErrNotACommand
@@ -66,6 +74,7 @@ func Parse(text string, chatID, userID int64) (Command, error) {
 		ChatID: chatID,
 		UserID: userID,
 		Raw:    trimmed,
+		SentAt: sentAt,
 	}, nil
 }
 
@@ -122,8 +131,15 @@ func (router *Router) Dispatch(
 	command Command,
 ) (string, error) {
 	if err := router.authorizer.Authorize(ctx, command); err != nil {
-		if errors.Is(err, ErrUnauthorized) {
+		// Each refusal reads differently, so the owner knows whether they
+		// were unauthorized, too late, or too fast.
+		switch {
+		case errors.Is(err, ErrUnauthorized):
 			return "You are not authorized to control this project.", nil
+		case errors.Is(err, ErrExpired):
+			return "That command is too old to act on. Send it again.", nil
+		case errors.Is(err, ErrRateLimited):
+			return "Too many commands just now. Try again shortly.", nil
 		}
 		return "", err
 	}

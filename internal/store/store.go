@@ -764,6 +764,18 @@ var migrations = []struct {
 		CREATE INDEX idx_owner_inputs_pending
 			ON owner_inputs(project_id, kind, consumed, id);
 	`},
+	// v19: refused command attempts. Repeated unauthorized attempts are the
+	// signal worth keeping, so refusals are recorded rather than only denied.
+	{19, `
+		CREATE TABLE command_refusals (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL,
+			command TEXT NOT NULL DEFAULT '',
+			reason TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL
+		);
+		CREATE INDEX idx_command_refusals_user ON command_refusals(user_id, id);
+	`},
 }
 
 func (s *Store) migrate() error {

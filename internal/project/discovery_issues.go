@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/eslam-mahmoud/go-ai-agent/internal/domain"
 	githubclient "github.com/eslam-mahmoud/go-ai-agent/internal/github"
+	"github.com/eslam-mahmoud/go-ai-agent/internal/githubops"
 	"github.com/eslam-mahmoud/go-ai-agent/internal/store"
 )
 
@@ -28,6 +30,14 @@ type DiscoveryIssueClient interface {
 		number int,
 		body string,
 	) (*githubclient.Comment, error)
+	// GetComments lets source-context comments be posted idempotently, so a
+	// retry after a partial failure does not repeat them.
+	GetComments(
+		ctx context.Context,
+		owner, repo string,
+		number int,
+		since *time.Time,
+	) ([]*githubclient.Comment, error)
 	EnsureLabels(ctx context.Context, owner, repo string, labels map[string]string) error
 }
 
@@ -116,8 +126,16 @@ func (publisher *DiscoveryIssuePublisher) PublishAcceptedDiscoveries(
 		}
 		existing := matchOpenIssue(openIssues, discovery.Title)
 		if existing != nil {
-			if _, err := publisher.client.PostComment(
-				ctx, owner, repo, existing.Number, discoverySourceComment(discovery),
+			// Keyed on the discovery, so a retry between the comment and the
+			// recorded issue number does not post it twice.
+			if _, err := githubops.EnsureComment(
+				ctx,
+				publisher.client,
+				owner,
+				repo,
+				existing.Number,
+				fmt.Sprintf("discovery:%d:source", discovery.ID),
+				discoverySourceComment(discovery),
 			); err != nil {
 				return nil, fmt.Errorf(
 					"%w: comment on issue #%d: %v",

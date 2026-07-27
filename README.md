@@ -64,6 +64,8 @@ Madar has **no CGO dependency** — the SQLite driver is pure Go, so the binary 
 curl -fsSL https://raw.githubusercontent.com/eslam-mahmoud/go-ai-agent/main/install.sh | bash
 ```
 
+Re-running the installer is safe and is the way to upgrade: it compares the installed binary against the latest release and only downloads when they differ, verifying the checksum before replacing anything. An up-to-date install is left alone, and a locally built `dev` binary is never replaced without asking.
+
 The installer:
 
 1. Installs git, Node.js, and the `gh` CLI if missing

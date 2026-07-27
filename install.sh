@@ -259,28 +259,181 @@ auth_claude() {
     success "Claude Code authenticated"
 }
 
+# confirm_default_no asks a yes/no question that defaults to no. It is used
+# only where the safe answer is to change nothing — a non-interactive run
+# (curl | bash with no terminal) therefore keeps what is already there.
+confirm_default_no() {
+    local answer=""
+    if [[ -t 0 ]]; then
+        read -rp "  $1 [y/N]: " answer
+    fi
+    [[ "$answer" =~ ^[Yy]$ ]]
+}
+
+# ── version helpers ───────────────────────────────────────────────────────────
+
+# installed_version prints the version of the binary already on disk, or an
+# empty string when there is none. "unknown" is deliberately distinct from
+# empty: a binary that will not report its version is still a binary, and the
+# two cases are handled differently.
+installed_version() {
+    [[ -x "$BIN_PATH" ]] || return 0
+    local raw
+    raw=$("$BIN_PATH" -version 2>/dev/null) || { echo "unknown"; return 0; }
+    # `madar v0.2.0 (commit abc1234, built …)` → `v0.2.0`
+    local parsed
+    parsed=$(echo "$raw" | awk '{print $2}')
+    echo "${parsed:-unknown}"
+}
+
+# RELEASE_TAG and RELEASE_URL are filled by fetch_release_info.
+RELEASE_TAG=""
+RELEASE_URL=""
+RELEASE_CHECKSUMS_URL=""
+
+# fetch_release_info resolves the latest release once and caches it, so the
+# rest of the installer does not make the same API call three times.
+#
+# It distinguishes three outcomes, because collapsing them is how a rate-limited
+# API turns into a surprise 3-minute source build:
+#   0  a release exists and has an asset for this platform
+#   1  the API call itself failed (network, rate limit)
+#   2  the API answered, but has no asset for this platform
+fetch_release_info() {
+    [[ -n "$RELEASE_TAG" ]] && return 0
+    local body
+    body=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null) || return 1
+    [[ -n "$body" ]] || return 1
+
+    RELEASE_TAG=$(echo "$body" | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+    RELEASE_URL=$(echo "$body" \
+        | grep "browser_download_url" \
+        | grep "madar-${PLATFORM}-${GOARCH}" \
+        | head -1 | cut -d'"' -f4)
+    RELEASE_CHECKSUMS_URL=$(echo "$body" \
+        | grep "browser_download_url" \
+        | grep "checksums.txt" \
+        | head -1 | cut -d'"' -f4)
+
+    [[ -n "$RELEASE_URL" ]] || return 2
+    return 0
+}
+
+# download_verified_binary fetches a release asset and checks it against the
+# published checksum before it is allowed anywhere near $BIN_PATH. Both the
+# install and update paths go through here; only update used to verify.
+download_verified_binary() {
+    local dest="$1"
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    curl -fsSL "$RELEASE_URL" -o "$tmpdir/madar.new" || {
+        rm -rf "$tmpdir"; return 1
+    }
+
+    if [[ -n "$RELEASE_CHECKSUMS_URL" ]]; then
+        if curl -fsSL "$RELEASE_CHECKSUMS_URL" -o "$tmpdir/checksums.txt"; then
+            local expected actual
+            expected=$(grep "madar-${PLATFORM}-${GOARCH}" "$tmpdir/checksums.txt" | awk '{print $1}')
+            if [[ -n "$expected" ]]; then
+                actual=$(checksum_of "$tmpdir/madar.new")
+                if [[ "$expected" != "$actual" ]]; then
+                    rm -rf "$tmpdir"
+                    die "Checksum mismatch for madar-${PLATFORM}-${GOARCH}. Expected $expected, got $actual. Refusing to install."
+                fi
+                success "Checksum verified"
+            fi
+        else
+            warn "Could not fetch checksums.txt — installing without verification"
+        fi
+    fi
+
+    run_privileged mv "$tmpdir/madar.new" "$dest" 2>/dev/null || mv "$tmpdir/madar.new" "$dest"
+    chmod +x "$dest"
+    rm -rf "$tmpdir"
+    return 0
+}
+
+# checksum_of works on both Linux (sha256sum) and macOS (shasum).
+checksum_of() {
+    if has_cmd sha256sum; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
 # ── step: download binary ─────────────────────────────────────────────────────
 install_binary() {
-    if [[ "$(step_status binary)" == "done" ]] && [[ -x "$BIN_PATH" ]]; then
-        success "Madar binary already installed (skipping)"
-        return
+    local current
+    current=$(installed_version)
+
+    local fetch_status=0
+    fetch_release_info || fetch_status=$?
+
+    if [[ -n "$current" ]]; then
+        info "Installed version: $current"
     fi
+    case "$fetch_status" in
+        0) info "Latest release   : $RELEASE_TAG" ;;
+        1) warn "Could not reach the GitHub release API (network or rate limit)" ;;
+        2) warn "No release asset for ${PLATFORM}-${GOARCH} (latest is ${RELEASE_TAG:-unknown})" ;;
+    esac
+
+    # Decide against the version actually on disk, not against an install-state
+    # marker. Keying off the marker is how an install that predates a config
+    # change gets "already installed (skipping)" forever, leaving a daemon that
+    # cannot start and no obvious way out.
+    if [[ -n "$current" ]]; then
+        if [[ "$current" == "dev" ]]; then
+            # A locally built binary is somebody's work in progress. Replacing
+            # it silently would discard it without a word.
+            warn "A locally built (dev) binary is installed at $BIN_PATH"
+            if [[ $fetch_status -eq 0 ]] && confirm_default_no "Replace it with release $RELEASE_TAG?"; then
+                info "Replacing the dev build with $RELEASE_TAG…"
+            else
+                success "Keeping the existing dev build"
+                step_done binary
+                link_binary_onto_path
+                return
+            fi
+        elif [[ $fetch_status -eq 1 ]]; then
+            # Cannot tell what is current, but something runnable is installed.
+            warn "Keeping the installed binary ($current) — could not check for updates"
+            step_done binary
+            link_binary_onto_path
+            return
+        elif [[ $fetch_status -eq 2 ]]; then
+            # The check succeeded; there is simply nothing prebuilt to install.
+            # Saying "could not check" here would be a lie, and would hide that
+            # an upgrade exists and needs a source build to get it.
+            warn "Keeping the installed binary ($current) — no prebuilt ${PLATFORM}-${GOARCH} asset in ${RELEASE_TAG:-the latest release}"
+            warn "To build ${RELEASE_TAG:-it} from source, remove $BIN_PATH and re-run"
+            step_done binary
+            link_binary_onto_path
+            return
+        elif [[ "$current" == "$RELEASE_TAG" ]]; then
+            success "Madar $current is already the latest release (skipping download)"
+            step_done binary
+            link_binary_onto_path
+            return
+        elif [[ "$current" == "unknown" ]]; then
+            # A binary that will not report its version is treated as outdated:
+            # upgrading unnecessarily is cheap, failing to upgrade is not.
+            warn "Installed binary does not report a version — upgrading to $RELEASE_TAG"
+        else
+            info "Upgrading $current → $RELEASE_TAG"
+        fi
+    fi
+
     info "Installing Madar binary…"
 
-    # Try to download pre-built release first
-    local release_url
-    release_url=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" \
-        | grep "browser_download_url" \
-        | grep "${PLATFORM}-${GOARCH}" \
-        | cut -d'"' -f4 || true)
-
-    if [[ -n "$release_url" ]]; then
-        info "Downloading from release: $release_url"
-        curl -fsSL "$release_url" -o "$BIN_PATH"
-        chmod +x "$BIN_PATH"
+    if [[ $fetch_status -eq 0 ]]; then
+        info "Downloading $RELEASE_URL"
+        download_verified_binary "$BIN_PATH" || die "Download failed. Check your connection and retry."
     else
-        # Fallback: build from source
-        warn "No pre-built release found for ${PLATFORM}-${GOARCH} — building from source"
+        # Fallback: build from source. Reached when there is no asset for
+        # this platform, or the release API could not be consulted at all.
+        warn "Building from source (no usable release for ${PLATFORM}-${GOARCH})"
         local tmpdir
         tmpdir=$(mktemp -d)
         info "Cloning source…"
@@ -723,7 +876,8 @@ main() {
             --uninstall)    mode="uninstall" ;;
             --help|-h)
                 echo "Usage: install.sh [--update | --update-keys | --uninstall]"
-                echo "  (no args)       Install or resume a partial install"
+                echo "  (no args)       Install, resume a partial install, or"
+                echo "                  upgrade an outdated binary to the latest release"
                 echo "  --update        Download and install the latest Madar release"
                 echo "  --update-keys   Re-prompt for credentials only"
                 echo "  --uninstall     Remove the service (keeps files)"

@@ -362,6 +362,99 @@ checksum_of() {
     fi
 }
 
+# load_env_credentials reads the Telegram values back out of .env for code
+# paths that did not just prompt for them. Only the keys needed for
+# notification are read; nothing else in .env is evaluated, so a stray line
+# cannot execute.
+load_env_credentials() {
+    [[ -f "$ENV_PATH" ]] || return 0
+    TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-$(grep "^TELEGRAM_BOT_TOKEN=" "$ENV_PATH" 2>/dev/null | cut -d= -f2- || true)}"
+    TELEGRAM_ALLOWED_IDS="${TELEGRAM_ALLOWED_IDS:-$(grep "^TELEGRAM_ALLOWED_IDS=" "$ENV_PATH" 2>/dev/null | cut -d= -f2- || true)}"
+}
+
+# ── telegram ──────────────────────────────────────────────────────────────────
+
+# telegram_notify sends one plain-text message to every configured chat.
+#
+# It exists so the Telegram wiring is proven at the moment it is configured.
+# Collecting a bot token and never using it means the first test of those
+# credentials is whenever Madar next has something to say — and a wrong chat ID
+# fails as silence, which is the hardest failure to notice.
+#
+# A send failure is reported and swallowed: the agent is installed and working
+# whether or not chat notifications reach anyone.
+telegram_notify() {
+    local text="$1"
+    if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_ALLOWED_IDS:-}" ]]; then
+        return 0
+    fi
+
+    local sent=0 failed=0 id
+    local ids_csv="${TELEGRAM_ALLOWED_IDS//[[:space:]]/}"
+    local old_ifs="$IFS"
+    IFS=','
+    for id in $ids_csv; do
+        [[ -n "$id" ]] || continue
+        # --data-urlencode keeps newlines and punctuation intact, and the
+        # response is discarded so a bot token can never reach the terminal.
+        if curl -fsS -m 15 -o /dev/null \
+            -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${id}" \
+            --data-urlencode "text=${text}" 2>/dev/null; then
+            sent=$((sent + 1))
+        else
+            failed=$((failed + 1))
+        fi
+    done
+    IFS="$old_ifs"
+
+    if (( sent > 0 )); then
+        success "Telegram: greeting delivered to ${sent} chat(s)"
+    fi
+    if (( failed > 0 )); then
+        warn "Telegram: ${failed} chat(s) unreachable — check TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_IDS"
+        warn "  A wrong chat ID fails silently later, so it is worth fixing now:"
+        warn "  curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | bash -s -- --update-keys"
+    fi
+}
+
+# telegram_greeting builds the message sent on install and re-install. It
+# doubles as the command reference, so the operator has it on their phone
+# rather than only in a terminal they are about to close.
+telegram_greeting() {
+    local version repo
+    version=$(installed_version)
+    repo=$(state_get project_repo)
+    cat <<GREETING
+Hi — Madar is installed and running.
+
+Version : ${version:-unknown}
+Host    : $(hostname 2>/dev/null || echo unknown)
+Project : ${repo:-not configured}
+
+I deliver one task at a time: plan, implement, review, fix, verify, then decide what comes next.
+
+Commands you can send me here:
+/status  - what I am working on right now
+/project - project health and progress
+/plan    - the current task's plan
+/next    - what I intend to pick up next
+/logs    - recent activity
+/pause   - stop after the current step
+/resume  - continue
+/cancel  - abandon the current task
+/retry   - retry the step that failed
+/help    - this list
+
+On the server:
+madar -status
+madar project list-tasks --repo ${repo:-owner/name}
+madar project add-task --repo ${repo:-owner/name} --title 'Title' --goal 'What done looks like'
+
+Send /status any time to check on me.
+GREETING
+}
+
 # ── step: download binary ─────────────────────────────────────────────────────
 install_binary() {
     local current
@@ -522,16 +615,27 @@ configure_credentials() {
         read_secret "GitHub token (hidden)" GITHUB_TOKEN
     fi
 
-    # Validate
-    info "Validating GitHub token…"
-    if validate_github_token "$GITHUB_TOKEN"; then
-        local gh_user
-        gh_user=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
-            "https://api.github.com/user" | python3 -c "import sys,json; print(json.load(sys.stdin)['login'])")
-        success "Token valid — authenticated as @${gh_user}"
-    else
-        die "GitHub token validation failed. Please check the token and try again."
-    fi
+    # Validate, and let a bad token be corrected here rather than sending the
+    # operator away to re-run the whole installer. A kept token that has since
+    # expired is the common case, and aborting on it is a dead end.
+    local attempts=0
+    while true; do
+        info "Validating GitHub token…"
+        if validate_github_token "$GITHUB_TOKEN"; then
+            local gh_user
+            gh_user=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+                "https://api.github.com/user" \
+                | python3 -c "import sys,json; print(json.load(sys.stdin)['login'])" 2>/dev/null)
+            success "Token valid — authenticated as @${gh_user:-unknown}"
+            break
+        fi
+        attempts=$((attempts + 1))
+        warn "GitHub token was rejected (expired, revoked, or missing the 'repo' scope)"
+        if [[ ! -t 0 ]] || (( attempts >= 3 )); then
+            die "GitHub token validation failed. Create one with 'repo' scope at https://github.com/settings/tokens/new and re-run."
+        fi
+        read -rsp "  GitHub token (hidden), or Ctrl-C to abort: " GITHUB_TOKEN; echo
+    done
 
     echo ""
 
@@ -839,30 +943,68 @@ uninstall() {
 
 # ── print final summary ───────────────────────────────────────────────────────
 print_summary() {
+    local repo
+    repo=$(state_get project_repo)
+
     echo ""
     bold "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     bold " Madar is installed and running!"
     bold "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
+    echo "  Version : $(installed_version)"
     echo "  Binary  : $BIN_PATH"
     echo "  Config  : $CONFIG_PATH"
     echo "  Secrets : $ENV_PATH"
     echo "  DB      : $MADAR_HOME/madar.db"
+    echo "  Project : ${repo:-not configured}"
     echo ""
-    echo "  Next steps:"
-    echo "   1. Add work to the backlog:"
-    echo "      $BIN_PATH project add-task -config $CONFIG_PATH \\"
-    echo "        --repo $(state_get project_repo) --title 'First task' --goal 'What done looks like'"
-    echo "   2. Madar picks it up on the next tick (~30s) and advances it one step at a time"
-    echo "   3. Watch it work:"
-    echo "      $BIN_PATH -config $CONFIG_PATH -status"
+    # These commands carry no -config flag on purpose: since #219 the binary
+    # discovers its own configuration and the installer links it onto PATH.
+    # Printing the old flags here would teach the wrong invocation at the exact
+    # moment someone is learning it.
+    echo "  Commands:"
+    echo "   Status         : madar -status"
+    echo "   Backlog        : madar project list-tasks --repo ${repo:-owner/name}"
+    echo "   Add a task     : madar project add-task --repo ${repo:-owner/name} \\"
+    echo "                      --title 'Title' --goal 'What done looks like'"
+    echo "   Project detail : madar project show --repo ${repo:-owner/name}"
+    echo "   Edit config    : \$EDITOR $CONFIG_PATH"
     echo ""
-    echo "  Useful commands:"
-    echo "   Backlog        : $BIN_PATH project list-tasks -config $CONFIG_PATH --repo $(state_get project_repo)"
-    echo "   Update Madar   : curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | bash -s -- --update"
+    echo "  Service:"
+    if [[ "$PLATFORM" == "linux" ]]; then
+        echo "   Logs           : journalctl -fu $SERVICE_NAME"
+        echo "   Restart        : systemctl restart $SERVICE_NAME"
+    else
+        echo "   Logs           : tail -f $MADAR_HOME/madar.log"
+    fi
+    echo ""
+    echo "  Maintenance:"
+    echo "   Update Madar   : curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | bash"
     echo "   Rotate keys    : curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | bash -s -- --update-keys"
     echo "   Uninstall      : curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | bash -s -- --uninstall"
-    echo "   Edit config    : \$EDITOR $CONFIG_PATH"
+    echo ""
+
+    # Prove the Telegram wiring now, while the operator is still here to fix
+    # it. A wrong chat ID otherwise fails as silence much later.
+    telegram_notify "$(telegram_greeting)"
+    echo ""
+
+    # One recommended action, not a menu. An installer that ends in a list of
+    # equally-weighted options leaves the reader deciding instead of doing.
+    bold "  Recommended next step"
+    if [[ -z "$repo" ]]; then
+        echo "   No project is configured yet. Create one:"
+        echo ""
+        echo "     madar project create --repo owner/name \\"
+        echo "       --name 'My Project' --goal 'What done looks like'"
+    else
+        echo "   Give Madar its first task — it picks up work on the next tick (~30s):"
+        echo ""
+        echo "     madar project add-task --repo ${repo} \\"
+        echo "       --title 'First task' --goal 'What done looks like'"
+        echo ""
+        echo "   Then watch it work:  madar -status"
+    fi
     echo ""
 }
 
@@ -982,11 +1124,19 @@ main() {
             local new_version
             new_version=$("$BIN_PATH" -version 2>/dev/null || echo "unknown")
             success "Updated: $old_version → $new_version"
+
+            # Announce the upgrade on the same channel the operator watches.
+            # Credentials live in .env, not in this shell, so load them first.
+            load_env_credentials
+            telegram_notify "$(telegram_greeting)"
             exit 0
             ;;
         update-keys)
             info "Update mode — re-configuring credentials"
             configure_credentials
+            # configure_credentials has just set these in this shell, so the
+            # greeting tests exactly the values that were entered.
+            telegram_notify "$(telegram_greeting)"
             # Restart service to pick up new .env
             if [[ "$PLATFORM" == "linux" ]] && has_cmd systemctl; then
                 run_privileged systemctl restart "$SERVICE_NAME" 2>/dev/null && \
@@ -1011,6 +1161,10 @@ main() {
             configure_project
             install_service
             print_summary
+            # Exit explicitly so the outcome is unambiguous to a caller, a
+            # pipe, or a CI step, rather than depending on the exit status of
+            # whatever ran last.
+            exit 0
             ;;
     esac
 }
